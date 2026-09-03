@@ -341,9 +341,18 @@ async fn dump(device: &FlukeDevice<BtleplugTransport>, output: &Path, seconds: u
     let transport = device.transport();
     let mut notifications = transport.notifications().await?;
     transport.subscribe(BINARY_READING).await?;
-    let mut file = tokio::fs::File::create(output)
-        .await
-        .with_context(|| format!("cannot create {}", output.display()))?;
+    if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("cannot create directory {}", parent.display()))?;
+    }
+    let mut file = tokio::fs::File::create(output).await.with_context(|| {
+        format!(
+            "cannot create {}: {}",
+            output.display(),
+            "check the path and permissions"
+        )
+    })?;
     let deadline = tokio::time::sleep(Duration::from_secs(seconds));
     tokio::pin!(deadline);
     let mut written = 0_usize;
