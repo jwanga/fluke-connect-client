@@ -69,6 +69,20 @@ pub struct Reading {
 impl Reading {
     /// Decodes an 8-byte reading record.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fluke_connect_client::{Reading, ReadingState, Unit};
+    ///
+    /// // 546.0 mV DC, as captured from a pc3000 FC.
+    /// let reading = Reading::from_bytes(&[0x54, 0x15, 0x00, 0x42, 0x02, 0x0C, 0x06, 0x01])?;
+    /// assert_eq!(reading.state(), ReadingState::Normal);
+    /// assert_eq!(reading.unit(), Unit::VoltsDc);
+    /// assert_eq!(reading.display_value(), Some(546.0));
+    /// assert_eq!(reading.value(), Some(0.546));
+    /// # Ok::<(), fluke_connect_client::ProtocolError>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`ProtocolError::InvalidLength`] when `bytes` is not exactly

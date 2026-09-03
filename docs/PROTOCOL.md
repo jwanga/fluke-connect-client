@@ -25,8 +25,8 @@ documentation or other implementations but not observed here are marked
 ## Device family
 
 Every Fluke Connect wireless product built on the FBLE module exposes the
-same profile: the ir3000 FC adapter (Fluke 189/289/789 and 1550/1555
-variants), the 3000 FC multimeter, the 376 FC and 902 FC clamps, and the
+same profile: the ir3000 FC adapter (Fluke 189, 287, 289 and 789; a
+separate variant serves the 1550/1555 insulation testers), the 3000 FC multimeter, the 376 FC and 902 FC clamps, and the
 t3000 FC, v3000 FC and a3000 FC modules. The devices differ in which
 optional characteristics they populate.
 

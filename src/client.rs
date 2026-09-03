@@ -15,6 +15,7 @@ pub const MAX_NAME_LEN: usize = 98;
 /// adapter itself. Any field the device does not expose is `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct DeviceInfo {
     /// Manufacturer name, for example `Fluke Mfg Co.`.
     pub manufacturer: Option<String>,
@@ -31,9 +32,9 @@ pub struct DeviceInfo {
 /// A connected Fluke Connect device.
 ///
 /// Wraps any [`Transport`] and speaks the Fluke Connect GATT profile over
-/// it. Obtain one from the built-in backend with
-/// [`Adapter::connect`](crate::backend::Adapter::connect), or construct it
-/// directly over your own transport with [`FlukeDevice::new`].
+/// it. Obtain one from the built-in backend with `backend::Adapter::connect`
+/// (feature `ble`), or construct it directly over your own transport with
+/// [`FlukeDevice::new`].
 #[derive(Debug)]
 pub struct FlukeDevice<T> {
     /// The underlying GATT connection.

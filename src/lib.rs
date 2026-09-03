@@ -10,12 +10,13 @@
 //!
 //! - [`protocol`]: pure, I/O-free parsing of the binary reading record and
 //!   the UUID table. Usable with `default-features = false`.
-//! - [`transport`]: a small async trait over a connected GATT peripheral so
-//!   the client can be driven by any Bluetooth stack or by a test double.
-//! - [`client`]: the [`FlukeDevice`] type that subscribes to readings and
-//!   exposes the housekeeping characteristics.
-//! - `backend`: the built-in [btleplug](https://crates.io/crates/btleplug)
-//!   transport, enabled by the `ble` feature.
+//! - `transport` (feature `std`): a small async trait over a connected GATT
+//!   peripheral so the client can be driven by any Bluetooth stack or by a
+//!   test double.
+//! - `client` (feature `std`): the `FlukeDevice` type that subscribes to
+//!   readings and exposes the housekeeping characteristics.
+//! - `backend` (feature `ble`): the built-in
+//!   [btleplug](https://crates.io/crates/btleplug) transport.
 //!
 //! # Hardware note
 //!
@@ -24,6 +25,8 @@
 //! the authors.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// Compile the README's examples as doctests; they need the built-in backend.
+#![cfg_attr(all(doctest, feature = "ble"), doc = include_str!("../README.md"))]
 
 #[cfg(test)]
 extern crate std;

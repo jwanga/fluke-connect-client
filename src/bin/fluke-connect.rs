@@ -100,8 +100,12 @@ enum DeviceCommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // RUST_LOG overrides; by default hide btleplug's chatty internal
+    // errors (it logs one on every clean CoreBluetooth disconnect).
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,btleplug=off"));
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
