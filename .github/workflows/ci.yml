@@ -88,5 +88,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Fail if the published file list changed without review
         run: |
-          cargo package --list --allow-dirty | sort > packaged.txt
+          cargo package --list --allow-dirty | LC_ALL=C sort > packaged.txt
           diff -u .github/expected-package-files.txt packaged.txt

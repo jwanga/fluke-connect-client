@@ -1,13 +1,13 @@
 .cargo_vcs_info.json
+CHANGELOG.md
 Cargo.lock
 Cargo.toml
 Cargo.toml.orig
-CHANGELOG.md
-docs/PROTOCOL.md
-examples/stream.rs
 LICENSE-APACHE
 LICENSE-MIT
 README.md
+docs/PROTOCOL.md
+examples/stream.rs
 src/backend/mod.rs
 src/bin/fluke-connect.rs
 src/client.rs
