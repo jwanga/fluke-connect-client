@@ -1,0 +1,26 @@
+# Build output
+/target/
+
+# Local tooling and environments
+/.venv/
+/.direnv/
+/.env
+*.log
+
+# Editor / OS noise
+/.idea/
+/.vscode/
+.DS_Store
+
+# AI-assistant and project-driver context files (kept local, never published)
+CLAUDE.md
+MEMORY.md
+INSTRUCTIONS.md
+REQUIREMENTS.md
+ARCHITECTURE.md
+/.claude/
+/docs/superpowers/
+
+# Raw hardware captures may contain meter serial numbers; only scrubbed
+# fixtures under tests/fixtures/ are committed.
+/captures/
