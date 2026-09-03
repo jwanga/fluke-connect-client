@@ -1,0 +1,276 @@
+//! High-level client for a connected Fluke Connect device.
+
+use futures_util::StreamExt as _;
+
+use crate::error::{Error, Result};
+use crate::protocol::uuids;
+use crate::protocol::{ReadingNotification, uuids::USER_STRING};
+use crate::transport::{BoxStream, Transport};
+
+/// Maximum length in bytes of the user-assignable device name.
+pub const MAX_NAME_LEN: usize = 98;
+
+/// Strings from the Bluetooth SIG *Device Information* service.
+///
+/// On an ir3000 FC adapter these describe the attached meter, not the
+/// adapter itself. Any field the device does not expose is `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DeviceInfo {
+    /// Manufacturer name, for example `Fluke Mfg Co.`.
+    pub manufacturer: Option<String>,
+    /// Model number, for example `FLUKE 289`.
+    pub model: Option<String>,
+    /// Serial number.
+    pub serial_number: Option<String>,
+    /// Firmware revision.
+    pub firmware_revision: Option<String>,
+    /// Software revision.
+    pub software_revision: Option<String>,
+}
+
+/// A connected Fluke Connect device.
+///
+/// Wraps any [`Transport`] and speaks the Fluke Connect GATT profile over
+/// it. Obtain one from the built-in backend with
+/// [`Adapter::connect`](crate::backend::Adapter::connect), or construct it
+/// directly over your own transport with [`FlukeDevice::new`].
+#[derive(Debug)]
+pub struct FlukeDevice<T> {
+    /// The underlying GATT connection.
+    transport: T,
+}
+
+impl<T: Transport> FlukeDevice<T> {
+    /// Wraps an already connected transport.
+    pub const fn new(transport: T) -> Self {
+        Self { transport }
+    }
+
+    /// Borrows the underlying transport.
+    pub const fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    /// Consumes the client and returns the transport.
+    pub fn into_transport(self) -> T {
+        self.transport
+    }
+
+    /// Subscribes to the binary reading characteristic and returns a stream
+    /// of decoded readings.
+    ///
+    /// The stream ends when the transport reports that the connection was
+    /// lost. Payloads that fail to decode are yielded as errors so a
+    /// consumer can log them without losing the stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription cannot be established.
+    pub async fn readings(&self) -> Result<BoxStream<'static, Result<ReadingNotification>>> {
+        let notifications = self.transport.notifications().await?;
+        self.transport.subscribe(uuids::BINARY_READING).await?;
+        Ok(notifications
+            .filter_map(|n| async move {
+                (n.characteristic == uuids::BINARY_READING)
+                    .then(|| ReadingNotification::from_bytes(&n.value).map_err(Error::from))
+            })
+            .boxed())
+    }
+
+    /// Reads the most recent reading without subscribing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read fails or the payload cannot be decoded.
+    pub async fn current_reading(&self) -> Result<ReadingNotification> {
+        let bytes = self.transport.read(uuids::BINARY_READING).await?;
+        Ok(ReadingNotification::from_bytes(&bytes)?)
+    }
+
+    /// Reads the *Device Information* service.
+    ///
+    /// Characteristics the device does not expose are left as `None`;
+    /// any other transport failure is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a read fails for a reason other than the
+    /// characteristic being absent.
+    pub async fn device_info(&self) -> Result<DeviceInfo> {
+        Ok(DeviceInfo {
+            manufacturer: self.optional_string(uuids::MANUFACTURER_NAME).await?,
+            model: self.optional_string(uuids::MODEL_NUMBER).await?,
+            serial_number: self.optional_string(uuids::SERIAL_NUMBER).await?,
+            firmware_revision: self.optional_string(uuids::FIRMWARE_REVISION).await?,
+            software_revision: self.optional_string(uuids::SOFTWARE_REVISION).await?,
+        })
+    }
+
+    /// Battery level in percent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read fails.
+    pub async fn battery_level(&self) -> Result<u8> {
+        let bytes = self.transport.read(uuids::BATTERY_LEVEL).await?;
+        bytes.first().copied().ok_or(Error::Protocol(
+            crate::protocol::ProtocolError::InvalidLength {
+                expected: 1,
+                actual: 0,
+            },
+        ))
+    }
+
+    /// Subscribes to battery level changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription cannot be established.
+    pub async fn battery_updates(&self) -> Result<BoxStream<'static, u8>> {
+        let notifications = self.transport.notifications().await?;
+        self.transport.subscribe(uuids::BATTERY_LEVEL).await?;
+        Ok(notifications
+            .filter_map(|n| async move {
+                (n.characteristic == uuids::BATTERY_LEVEL)
+                    .then(|| n.value.first().copied())
+                    .flatten()
+            })
+            .boxed())
+    }
+
+    /// The ID number shown on devices with a display (`0` when unset).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read fails.
+    pub async fn id_number(&self) -> Result<u8> {
+        let bytes = self.transport.read(uuids::ID_NUMBER).await?;
+        Ok(bytes.first().copied().unwrap_or(0))
+    }
+
+    /// Sets the ID number shown on devices with a display.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write fails.
+    pub async fn set_id_number(&self, id: u8) -> Result<()> {
+        Ok(self.transport.write(uuids::ID_NUMBER, &[id], true).await?)
+    }
+
+    /// The user-assignable device name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read fails or the name is not UTF-8.
+    pub async fn name(&self) -> Result<String> {
+        let bytes = self.transport.read(USER_STRING).await?;
+        decode_string(&bytes)
+    }
+
+    /// Sets the user-assignable device name (at most [`MAX_NAME_LEN`] bytes).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NameTooLong`] if the name is too long, or an error
+    /// if the write fails.
+    pub async fn set_name(&self, name: &str) -> Result<()> {
+        if name.len() > MAX_NAME_LEN {
+            return Err(Error::NameTooLong {
+                len: name.len(),
+                max: MAX_NAME_LEN,
+            });
+        }
+        Ok(self
+            .transport
+            .write(USER_STRING, name.as_bytes(), true)
+            .await?)
+    }
+
+    /// Turns the locator LED on or off.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write fails.
+    pub async fn set_locator(&self, on: bool) -> Result<()> {
+        Ok(self
+            .transport
+            .write(uuids::LOCATOR, &[u8::from(on)], true)
+            .await?)
+    }
+
+    /// Sets the device clock to a POSIX timestamp in seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write fails.
+    pub async fn set_time(&self, posix_seconds: u64) -> Result<()> {
+        Ok(self
+            .transport
+            .write(uuids::POSIX_TIME, &posix_seconds.to_le_bytes(), true)
+            .await?)
+    }
+
+    /// Asks the device to drop the connection from its side.
+    ///
+    /// The ir3000 FC accepts the write but was not observed to actually
+    /// disconnect; prefer [`disconnect`](Self::disconnect).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write fails.
+    pub async fn force_drop(&self) -> Result<()> {
+        Ok(self.transport.write(uuids::FORCE_DROP, &[1], false).await?)
+    }
+
+    /// Closes the connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transport fails to disconnect.
+    pub async fn disconnect(&self) -> Result<()> {
+        Ok(self.transport.disconnect().await?)
+    }
+
+    /// Reads a string characteristic, mapping "not found" to `None`.
+    async fn optional_string(&self, characteristic: u128) -> Result<Option<String>> {
+        match self.transport.read(characteristic).await {
+            Ok(bytes) => decode_string(&bytes).map(Some),
+            Err(crate::transport::TransportError::CharacteristicNotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+/// Decodes a device string, trimming the NUL padding and trailing spaces
+/// that Fluke devices append.
+fn decode_string(bytes: &[u8]) -> Result<String> {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let text = bytes.get(..end).unwrap_or_default();
+    core::str::from_utf8(text)
+        .map(|s| s.trim_end().to_owned())
+        .map_err(|_| Error::InvalidUtf8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_string;
+
+    #[test]
+    fn strings_are_trimmed_of_nul_and_spaces() {
+        assert_eq!(
+            decode_string(b"01.00.01  \0").ok(),
+            Some("01.00.01".to_owned())
+        );
+        assert_eq!(
+            decode_string(b"FLUKE 289").ok(),
+            Some("FLUKE 289".to_owned())
+        );
+        assert_eq!(decode_string(b"").ok(), Some(String::new()));
+    }
+
+    #[test]
+    fn invalid_utf8_is_an_error() {
+        assert!(decode_string(&[0xFF, 0xFE]).is_err());
+    }
+}
