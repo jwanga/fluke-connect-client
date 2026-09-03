@@ -314,7 +314,7 @@ mod tests {
     use std::string::ToString as _;
 
     use super::{NO_VALUE_MANTISSA, Reading, pow10, scale};
-    use crate::protocol::enums::{Function, Magnitude, ReadingState, Unit};
+    use crate::protocol::enums::{Attribute, Function, Magnitude, ReadingState, Unit};
 
     /// Decodes a hex string into a reading.
     fn reading(hex: &str) -> Reading {
@@ -392,6 +392,16 @@ mod tests {
         assert_eq!(r.state(), ReadingState::Blank);
         assert_eq!(r.function(), Function::Resistance);
         assert_eq!(r.to_string(), "---- MΩ");
+    }
+
+    #[test]
+    fn continuity_with_shorted_leads_sets_short_circuit_attribute() {
+        let r = reading("d50100040b270008");
+        assert_eq!(r.function(), Function::Continuity);
+        assert_eq!(r.unit(), Unit::Ohms);
+        assert_eq!(r.attribute(), Attribute::ShortCircuit);
+        assert_eq!(r.display_value(), Some(4.69));
+        assert_eq!(r.to_string(), "4.69 Ω");
     }
 
     #[test]
