@@ -1,0 +1,153 @@
+# fluke-connect-client
+
+[![crates.io](https://img.shields.io/crates/v/fluke-connect-client.svg)](https://crates.io/crates/fluke-connect-client)
+[![docs.rs](https://docs.rs/fluke-connect-client/badge.svg)](https://docs.rs/fluke-connect-client)
+[![CI](https://github.com/jwanga/fluke-connect-client/actions/workflows/ci.yml/badge.svg)](https://github.com/jwanga/fluke-connect-client/actions/workflows/ci.yml)
+
+Read live measurements from **Fluke Connect** Bluetooth Low Energy meters
+and adapters from Rust.
+
+Fluke Connect devices share one vendor GATT profile. This crate decodes it
+and, with the default `ble` feature, discovers devices, connects, and
+streams decoded readings as an async `Stream`. It also exposes the
+housekeeping characteristics: device information, battery level, locator
+LED, ID number, device name and clock.
+
+## Hardware support
+
+The protocol is shared across the Fluke Connect family, so the crate should
+work with:
+
+- **ir3000 FC** infrared adapter (Fluke 189 / 287 / 289 / 789 and the
+  1550 / 1555 variant)
+- **3000 FC** wireless multimeter
+- **376 FC** and **902 FC** clamp meters
+- **t3000 FC**, **v3000 FC** and **a3000 FC** wireless modules
+
+> **Tested hardware:** the crate has only been verified against an
+> **ir3000 FC attached to a Fluke 289**. Reports and packet captures from
+> other family members are very welcome; the `fluke-connect dump` command
+> exists for exactly that.
+
+Not supported by design: firmware updates (the update characteristics are
+present but deliberately left alone) and downloading logged data from the
+meter (the ir3000 FC does not expose it).
+
+## Quick start
+
+```toml
+[dependencies]
+fluke-connect-client = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures-util = "0.3"
+```
+
+```rust,no_run
+use std::time::Duration;
+
+use fluke_connect_client::backend::Adapter;
+use futures_util::StreamExt as _;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let adapter = Adapter::default().await?;
+    let device = adapter.connect_first(Duration::from_secs(60)).await?;
+
+    let info = device.device_info().await?;
+    println!("connected to {:?}", info.model);
+
+    let mut readings = device.readings().await?;
+    while let Some(reading) = readings.next().await {
+        let reading = reading?;
+        println!("{}", reading.primary());
+        if let Some(secondary) = reading.secondary() {
+            println!("  secondary: {secondary}");
+        }
+    }
+    Ok(())
+}
+```
+
+Each reading carries the display state (normal, blank, `OL`, open
+thermocouple, ...), the unit, the meter function, the SI prefix and the
+value both as displayed and converted to base units:
+
+```rust
+use fluke_connect_client::{Reading, ReadingState, Unit};
+
+let reading = Reading::from_bytes(&[0x54, 0x15, 0x00, 0x42, 0x02, 0x0C, 0x06, 0x01])?;
+assert_eq!(reading.state(), ReadingState::Normal);
+assert_eq!(reading.unit(), Unit::VoltsDc);
+assert_eq!(reading.display_value(), Some(546.0)); // 546.0 mV DC
+assert_eq!(reading.value(), Some(0.546));         // volts
+assert_eq!(reading.to_string(), "546.0 mV DC");
+# Ok::<(), fluke_connect_client::ProtocolError>(())
+```
+
+## Command-line tool
+
+A diagnostic CLI ships behind the `cli` feature:
+
+```sh
+cargo install fluke-connect-client --features cli
+
+fluke-connect doctor              # adapter state and permission hints
+fluke-connect scan                # list Fluke Connect devices in range
+fluke-connect info                # device information, battery, name, ID
+fluke-connect stream              # live readings; --json for machine output
+fluke-connect dump readings.jsonl # raw notification capture for bug reports
+fluke-connect locator on          # blink the device LED
+```
+
+## Platform notes
+
+- **macOS:** a command-line program inherits the Bluetooth permission of the
+  terminal it runs in. If scanning finds nothing or you get a permission
+  error, enable your terminal under *System Settings › Privacy & Security ›
+  Bluetooth*.
+- **Linux:** building needs `libdbus-1-dev` and `pkg-config`; running needs
+  BlueZ (`bluetoothd`).
+- **Windows:** works on Windows 10 and later with no extra setup.
+- The ir3000 FC sleeps until its button is held for about a second. It
+  advertises slowly, so allow a scan of 30 to 60 seconds.
+
+## Features
+
+| Feature | Default | Enables |
+|---------|---------|---------|
+| `std`   | yes | the async client and transport trait |
+| `ble`   | yes | the built-in btleplug transport (macOS, Linux, Windows) |
+| `serde` | no  | `Serialize` / `Deserialize` on protocol types |
+| `cli`   | no  | the `fluke-connect` binary |
+
+With `default-features = false` the crate is `no_std` and contains only the
+protocol parser, suitable for embedded hosts that bring their own BLE stack.
+
+## Bring your own Bluetooth stack
+
+Implement the small [`Transport`](https://docs.rs/fluke-connect-client/latest/fluke_connect_client/transport/trait.Transport.html)
+trait over any connected GATT peripheral and hand it to `FlukeDevice::new`.
+The `tests/client_mock.rs` file shows a complete in-memory implementation.
+
+## Protocol documentation
+
+The wire format, UUID table and what was verified on real hardware are
+described in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+## Minimum supported Rust version
+
+Rust 1.85. The MSRV may be raised in minor releases but will always be at
+least six months old.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.
+
+Fluke and Fluke Connect are trademarks of Fluke Corporation. This project is
+not affiliated with or endorsed by Fluke.
