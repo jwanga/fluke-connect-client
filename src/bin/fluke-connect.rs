@@ -346,13 +346,9 @@ async fn dump(device: &FlukeDevice<BtleplugTransport>, output: &Path, seconds: u
             .await
             .with_context(|| format!("cannot create directory {}", parent.display()))?;
     }
-    let mut file = tokio::fs::File::create(output).await.with_context(|| {
-        format!(
-            "cannot create {}: {}",
-            output.display(),
-            "check the path and permissions"
-        )
-    })?;
+    let mut file = tokio::fs::File::create(output)
+        .await
+        .with_context(|| format!("cannot create {}", output.display()))?;
     let deadline = tokio::time::sleep(Duration::from_secs(seconds));
     tokio::pin!(deadline);
     let mut written = 0_usize;
