@@ -6,13 +6,15 @@
 )]
 
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use fluke_connect_client::backend::{Adapter, BtleplugTransport, DiscoveredDevice};
-use fluke_connect_client::{FlukeDevice, ReadingNotification};
+use fluke_connect_client::protocol::uuids::BINARY_READING;
+use fluke_connect_client::transport::Transport as _;
+use fluke_connect_client::{FlukeDevice, Reading, ReadingNotification};
 use futures_util::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 
@@ -24,8 +26,8 @@ struct Cli {
     #[arg(long, global = true, default_value_t = 60)]
     scan_timeout: u64,
     /// Only use the device whose advertised name contains this text.
-    #[arg(long, global = true)]
-    name: Option<String>,
+    #[arg(long = "name", global = true)]
+    device_name: Option<String>,
     /// What to do.
     #[command(subcommand)]
     command: Command,
@@ -47,7 +49,15 @@ enum Command {
     Doctor,
     /// List Fluke Connect devices in range.
     Scan,
-    /// Show device information, battery, name and ID number.
+    /// Commands that connect to a device first.
+    #[command(flatten)]
+    Device(DeviceCommand),
+}
+
+/// Subcommands that operate on a connected device.
+#[derive(Debug, Subcommand)]
+enum DeviceCommand {
+    /// Show device information, battery, name, ID number and GATT table.
     Info,
     /// Print live readings.
     Stream {
@@ -77,7 +87,7 @@ enum Command {
     /// Set the user-assignable device name (up to 98 bytes).
     SetName {
         /// The new name.
-        name: String,
+        new_name: String,
     },
     /// Set the ID number shown on devices with a display.
     SetId {
@@ -90,74 +100,61 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // RUST_LOG overrides; by default hide btleplug's chatty internal
+    // errors (it logs one on every clean CoreBluetooth disconnect).
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,btleplug=off"));
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
     let timeout = Duration::from_secs(cli.scan_timeout);
 
-    match cli.command {
-        Command::Doctor => doctor().await,
-        Command::Scan => {
-            let adapter = Adapter::default().await?;
-            eprintln!("scanning for {}s...", cli.scan_timeout);
-            let devices = adapter.scan(timeout).await?;
-            if devices.is_empty() {
-                println!("no Fluke Connect devices found (is the device awake and advertising?)");
-            }
-            for device in devices {
-                println!("{device}");
-            }
-            Ok(())
-        }
-        Command::Info => {
-            let device = connect(timeout, cli.name.as_deref()).await?;
-            info(&device).await
-        }
-        Command::Stream {
+    let command = match cli.command {
+        Command::Doctor => return doctor().await,
+        Command::Scan => return scan(timeout).await,
+        Command::Device(command) => command,
+    };
+
+    let device = connect(timeout, cli.device_name.as_deref()).await?;
+    let result = run(&device, command).await;
+    // Always release the link: BlueZ keeps LE connections alive after the
+    // client exits, which would stop the adapter advertising.
+    if let Err(e) = device.disconnect().await {
+        eprintln!("warning: disconnect failed: {e}");
+    }
+    result
+}
+
+/// Runs a command that needs a connected device.
+async fn run(device: &FlukeDevice<BtleplugTransport>, command: DeviceCommand) -> Result<()> {
+    match command {
+        DeviceCommand::Info => info(device).await,
+        DeviceCommand::Stream {
             json,
             count,
             seconds,
-        } => {
-            let device = connect(timeout, cli.name.as_deref()).await?;
-            stream(&device, json, count, seconds).await
-        }
-        Command::Dump { output, seconds } => {
-            let device = connect(timeout, cli.name.as_deref()).await?;
-            dump(&device, &output, seconds).await
-        }
-        Command::Locator { state } => {
-            let device = connect(timeout, cli.name.as_deref()).await?;
-            device.set_locator(matches!(state, Switch::On)).await?;
-            println!(
-                "locator {}",
-                if matches!(state, Switch::On) {
-                    "on"
-                } else {
-                    "off"
-                }
-            );
+        } => stream(device, json, count, seconds).await,
+        DeviceCommand::Dump { output, seconds } => dump(device, &output, seconds).await,
+        DeviceCommand::Locator { state } => {
+            let on = matches!(state, Switch::On);
+            device.set_locator(on).await?;
+            println!("locator {}", if on { "on" } else { "off" });
             Ok(())
         }
-        Command::SetName { name } => {
-            let device = connect(timeout, cli.name.as_deref()).await?;
-            device.set_name(&name).await?;
-            println!("name set to {name:?}");
+        DeviceCommand::SetName { new_name } => {
+            device.set_name(&new_name).await?;
+            println!("name set to {new_name:?}");
             Ok(())
         }
-        Command::SetId { id } => {
-            let device = connect(timeout, cli.name.as_deref()).await?;
+        DeviceCommand::SetId { id } => {
             device.set_id_number(id).await?;
             println!("id set to {id}");
             Ok(())
         }
-        Command::SetTime => {
-            let device = connect(timeout, cli.name.as_deref()).await?;
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .context("system clock is before 1970")?
-                .as_secs();
+        DeviceCommand::SetTime => {
+            let now = unix_now()?.as_secs();
             device.set_time(now).await?;
             println!("time set to {now}");
             Ok(())
@@ -167,7 +164,7 @@ async fn main() -> Result<()> {
 
 /// Prints adapter diagnostics.
 async fn doctor() -> Result<()> {
-    match Adapter::default().await {
+    match Adapter::open().await {
         Ok(adapter) => {
             println!(
                 "adapter: {}",
@@ -192,9 +189,23 @@ async fn doctor() -> Result<()> {
     Ok(())
 }
 
+/// Lists devices in range.
+async fn scan(timeout: Duration) -> Result<()> {
+    let adapter = Adapter::open().await?;
+    eprintln!("scanning for {}s...", timeout.as_secs());
+    let devices = adapter.scan(timeout).await?;
+    if devices.is_empty() {
+        println!("no Fluke Connect devices found (is the device awake and advertising?)");
+    }
+    for device in devices {
+        println!("{device}");
+    }
+    Ok(())
+}
+
 /// Scans for a device (optionally by name) and connects.
 async fn connect(timeout: Duration, name: Option<&str>) -> Result<FlukeDevice<BtleplugTransport>> {
-    let adapter = Adapter::default().await?;
+    let adapter = Adapter::open().await?;
     eprintln!("scanning (up to {}s)...", timeout.as_secs());
     let device: DiscoveredDevice = match name {
         None => adapter.find_first(timeout).await?,
@@ -214,43 +225,47 @@ async fn connect(timeout: Duration, name: Option<&str>) -> Result<FlukeDevice<Bt
 /// Prints device information.
 async fn info(device: &FlukeDevice<BtleplugTransport>) -> Result<()> {
     let info = device.device_info().await?;
-    println!(
-        "manufacturer:      {}",
-        info.manufacturer.as_deref().unwrap_or("-")
-    );
-    println!(
-        "model:             {}",
-        info.model.as_deref().unwrap_or("-")
-    );
-    println!(
-        "serial number:     {}",
-        info.serial_number.as_deref().unwrap_or("-")
-    );
-    println!(
-        "firmware revision: {}",
-        info.firmware_revision.as_deref().unwrap_or("-")
-    );
-    println!(
-        "software revision: {}",
-        info.software_revision.as_deref().unwrap_or("-")
-    );
-    match device.battery_level().await {
-        Ok(level) => println!("battery:           {level}%"),
-        Err(e) => println!("battery:           unavailable ({e})"),
+    let fields = [
+        ("manufacturer", &info.manufacturer),
+        ("model", &info.model),
+        ("serial number", &info.serial_number),
+        ("firmware revision", &info.firmware_revision),
+        ("software revision", &info.software_revision),
+    ];
+    for (label, value) in fields {
+        println!("{label:<18} {}", value.as_deref().unwrap_or("-"));
     }
-    match device.name().await {
-        Ok(name) => println!("device name:       {name}"),
-        Err(e) => println!("device name:       unavailable ({e})"),
-    }
-    match device.id_number().await {
-        Ok(id) => println!("id number:         {id}"),
-        Err(e) => println!("id number:         unavailable ({e})"),
-    }
-    match device.current_reading().await {
-        Ok(reading) => println!("current reading:   {}", reading.primary()),
-        Err(e) => println!("current reading:   unavailable ({e})"),
+    print_or_error(
+        "battery",
+        device.battery_level().await.map(|b| format!("{b}%")),
+    );
+    print_or_error("device name", device.name().await);
+    print_or_error(
+        "id number",
+        device.id_number().await.map(|id| id.to_string()),
+    );
+    print_or_error(
+        "current reading",
+        device
+            .current_reading()
+            .await
+            .map(|r| r.primary().to_string()),
+    );
+    println!("characteristics:");
+    let mut uuids: Vec<u128> = device.transport().characteristic_uuids().collect();
+    uuids.sort_unstable();
+    for uuid in uuids {
+        println!("  {}", uuid::Uuid::from_u128(uuid));
     }
     Ok(())
+}
+
+/// Prints a labelled value or the error that prevented reading it.
+fn print_or_error<E: std::fmt::Display>(label: &str, value: Result<String, E>) {
+    match value {
+        Ok(v) => println!("{label:<18} {v}"),
+        Err(e) => println!("{label:<18} unavailable ({e})"),
+    }
 }
 
 /// Streams readings to stdout.
@@ -296,48 +311,33 @@ async fn stream(
     Ok(())
 }
 
-/// Serialises a reading as one JSON line.
+/// Serialises a notification as one JSON line.
 fn json_line(reading: &ReadingNotification) -> String {
-    let primary = reading.primary();
-    let value = serde_json::json!({
-        "primary": {
-            "display": primary.to_string(),
-            "value": primary.value(),
-            "display_value": primary.display_value(),
-            "unit": primary.unit(),
-            "function": primary.function(),
-            "state": primary.state(),
-            "attribute": primary.attribute(),
-            "magnitude": primary.magnitude(),
-            "raw": hex(primary.raw()),
-        },
-        "secondary": reading.secondary().map(|s| serde_json::json!({
-            "display": s.to_string(),
-            "value": s.value(),
-            "display_value": s.display_value(),
-            "unit": s.unit(),
-            "function": s.function(),
-            "state": s.state(),
-            "attribute": s.attribute(),
-            "magnitude": s.magnitude(),
-            "raw": hex(s.raw()),
-        })),
-        "timestamp": SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0.0, |d| d.as_secs_f64()),
-    });
-    value.to_string()
+    serde_json::json!({
+        "primary": reading_json(reading.primary()),
+        "secondary": reading.secondary().map(reading_json),
+        "timestamp": unix_now().map_or(0.0, |d| d.as_secs_f64()),
+    })
+    .to_string()
+}
+
+/// Serialises one reading.
+fn reading_json(reading: &Reading) -> serde_json::Value {
+    serde_json::json!({
+        "display": reading.to_string(),
+        "value": reading.value(),
+        "display_value": reading.display_value(),
+        "unit": reading.unit(),
+        "function": reading.function(),
+        "state": reading.state(),
+        "attribute": reading.attribute(),
+        "magnitude": reading.magnitude(),
+        "raw": hex(reading.raw()),
+    })
 }
 
 /// Writes raw notifications as JSON Lines for fixture capture.
-async fn dump(
-    device: &FlukeDevice<BtleplugTransport>,
-    output: &std::path::Path,
-    seconds: u64,
-) -> Result<()> {
-    use fluke_connect_client::protocol::uuids::BINARY_READING;
-    use fluke_connect_client::transport::Transport as _;
-
+async fn dump(device: &FlukeDevice<BtleplugTransport>, output: &Path, seconds: u64) -> Result<()> {
     let transport = device.transport();
     let mut notifications = transport.notifications().await?;
     transport.subscribe(BINARY_READING).await?;
@@ -357,12 +357,9 @@ async fn dump(
             _ = tokio::signal::ctrl_c() => break,
             next = notifications.next() => {
                 let Some(n) = next else { break };
-                let ts = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0.0, |d| d.as_secs_f64());
                 let line = serde_json::json!({
-                    "t": ts,
-                    "characteristic": format!("{:032x}", n.characteristic),
+                    "t": unix_now().map_or(0.0, |d| d.as_secs_f64()),
+                    "characteristic": uuid::Uuid::from_u128(n.characteristic).to_string(),
                     "hex": hex(&n.value),
                 });
                 file.write_all(format!("{line}\n").as_bytes()).await?;
@@ -375,12 +372,19 @@ async fn dump(
     Ok(())
 }
 
+/// Time since the UNIX epoch.
+fn unix_now() -> Result<Duration> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before 1970")
+}
+
 /// Lower-case hex encoding.
 fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
     bytes.iter().fold(
         String::with_capacity(bytes.len().saturating_mul(2)),
         |mut s, b| {
-            use std::fmt::Write as _;
             // Writing to a String cannot fail.
             let _ = write!(s, "{b:02x}");
             s

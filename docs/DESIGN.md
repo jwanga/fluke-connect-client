@@ -92,7 +92,7 @@ first-run failure.
 
 ## Public repository hygiene
 
-Edition 2024, MSRV 1.85, dual MIT / Apache-2.0, clippy `pedantic`,
+Edition 2024, MSRV 1.88, dual MIT / Apache-2.0, clippy `pedantic`,
 `nursery`, `cargo` plus selected restriction lints with warnings denied in
 CI, `cargo-deny`, release-plz with conventional commits, and an explicit
 `include` list in `Cargo.toml`.

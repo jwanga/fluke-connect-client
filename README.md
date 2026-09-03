@@ -18,8 +18,8 @@ LED, ID number, device name and clock.
 The protocol is shared across the Fluke Connect family, so the crate should
 work with:
 
-- **ir3000 FC** infrared adapter (Fluke 189 / 287 / 289 / 789 and the
-  1550 / 1555 variant)
+- **ir3000 FC** infrared adapter (Fluke 189, 287, 289 and 789, plus the
+  1550 / 1555 insulation-tester variant)
 - **3000 FC** wireless multimeter
 - **376 FC** and **902 FC** clamp meters
 - **t3000 FC**, **v3000 FC** and **a3000 FC** wireless modules
@@ -50,7 +50,7 @@ use futures_util::StreamExt as _;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let adapter = Adapter::default().await?;
+    let adapter = Adapter::open().await?;
     let device = adapter.connect_first(Duration::from_secs(60)).await?;
 
     let info = device.device_info().await?;
@@ -117,7 +117,8 @@ fluke-connect locator on          # blink the device LED
 |---------|---------|---------|
 | `std`   | yes | the async client and transport trait |
 | `ble`   | yes | the built-in btleplug transport (macOS, Linux, Windows) |
-| `serde` | no  | `Serialize` / `Deserialize` on protocol types |
+| `serde` | no  | `Serialize` on readings, `Serialize` / `Deserialize` on enums and `DeviceInfo` |
+| `tracing` | no | `tracing` events from the built-in backend |
 | `cli`   | no  | the `fluke-connect` binary |
 
 With `default-features = false` the crate is `no_std` and contains only the
@@ -136,7 +137,7 @@ described in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 ## Minimum supported Rust version
 
-Rust 1.85. The MSRV may be raised in minor releases but will always be at
+Rust 1.88 (btleplug 0.13 uses let-chains on macOS and Windows). The MSRV may be raised in minor releases but will always be at
 least six months old.
 
 ## License

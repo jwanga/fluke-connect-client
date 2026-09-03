@@ -317,7 +317,6 @@ dependencies = [
  "anyhow",
  "btleplug",
  "clap",
- "futures-core",
  "futures-util",
  "proptest",
  "serde",

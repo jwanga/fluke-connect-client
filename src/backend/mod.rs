@@ -86,10 +86,10 @@ impl Adapter {
     ///
     /// # Errors
     ///
-    /// Returns [`TransportError::NoAdapter`] when there is none or it is
-    /// powered off, and [`TransportError::PermissionDenied`] when the
-    /// operating system refuses access.
-    pub async fn default() -> Result<Self> {
+    /// Returns [`TransportError::NoAdapter`] when there is none, and
+    /// [`TransportError::PermissionDenied`] when the operating system
+    /// refuses access.
+    pub async fn open() -> Result<Self> {
         let manager = Manager::new().await.map_err(map_err)?;
         let inner = manager
             .adapters()
@@ -168,11 +168,15 @@ impl Adapter {
         let peripheral = self.inner.peripheral(&device.id).await.map_err(map_err)?;
         #[cfg(feature = "tracing")]
         tracing::debug!(device = %device, "connecting");
-        peripheral
-            .connect_with_timeout(CONNECT_TIMEOUT)
-            .await
-            .map_err(map_err)?;
-        peripheral.discover_services().await.map_err(map_err)?;
+        if let Err(e) = peripheral.connect_with_timeout(CONNECT_TIMEOUT).await {
+            // A timed-out connect can leave the attempt pending on the OS side.
+            let _ = peripheral.disconnect().await;
+            return Err(map_err(e).into());
+        }
+        if let Err(e) = peripheral.discover_services().await {
+            let _ = peripheral.disconnect().await;
+            return Err(map_err(e).into());
+        }
         let characteristics = peripheral
             .characteristics()
             .into_iter()
@@ -314,29 +318,22 @@ impl Transport for BtleplugTransport {
             .notifications()
             .await
             .map_err(map_err)?
-            .map(|n| {
-                Some(Notification {
-                    characteristic: n.uuid.as_u128(),
-                    value: n.value,
-                })
+            .map(|n| Notification {
+                characteristic: n.uuid.as_u128(),
+                value: n.value,
             });
-        let disconnects = self
+        let disconnected = self
             .adapter
             .events()
             .await
             .map_err(map_err)?
-            .filter_map(move |event| {
-                let ended =
-                    matches!(&event, CentralEvent::DeviceDisconnected(other) if *other == id);
-                async move { ended.then_some(None) }
-            });
-        Ok(futures_util::stream::select(values, disconnects)
-            .take_while(|item| {
-                let open = item.is_some();
-                async move { open }
+            .filter(move |event| {
+                let ours = matches!(event, CentralEvent::DeviceDisconnected(other) if *other == id);
+                async move { ours }
             })
-            .filter_map(|item| async move { item })
-            .boxed())
+            .boxed()
+            .into_future();
+        Ok(values.take_until(disconnected).boxed())
     }
 
     async fn disconnect(&self) -> Result<(), TransportError> {

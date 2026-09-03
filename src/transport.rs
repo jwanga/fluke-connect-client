@@ -5,12 +5,8 @@
 //! or with a scripted test double.
 
 use core::future::Future;
-use core::pin::Pin;
 
-use futures_core::Stream;
-
-/// A boxed, sendable stream.
-pub type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + 'a>>;
+pub use futures_util::stream::BoxStream;
 
 /// A value notification from a characteristic.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,5 +1,5 @@
 # Distinct 16-byte reading notifications captured from an ir3000 FC attached to a Fluke 289.
-# Format: <hex> <human description>. Primary reading = bytes 0..8, secondary = bytes 8..16.
+# Format: one 16-byte notification per line as lower-case hex. Primary reading = bytes 0..8, secondary = bytes 8..16.
 # Captured 2026-09-03; no serial numbers are present in these records.
 01030002082200000000000000000000
 00030002082200000000000000000000

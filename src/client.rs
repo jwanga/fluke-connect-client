@@ -3,9 +3,8 @@
 use futures_util::StreamExt as _;
 
 use crate::error::{Error, Result};
-use crate::protocol::uuids;
-use crate::protocol::{ReadingNotification, uuids::USER_STRING};
-use crate::transport::{BoxStream, Transport};
+use crate::protocol::{ProtocolError, ReadingNotification, uuids};
+use crate::transport::{BoxStream, Transport, TransportError};
 
 /// Maximum length in bytes of the user-assignable device name.
 pub const MAX_NAME_LEN: usize = 98;
@@ -16,6 +15,7 @@ pub const MAX_NAME_LEN: usize = 98;
 /// adapter itself. Any field the device does not expose is `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct DeviceInfo {
     /// Manufacturer name, for example `Fluke Mfg Co.`.
     pub manufacturer: Option<String>,
@@ -32,9 +32,9 @@ pub struct DeviceInfo {
 /// A connected Fluke Connect device.
 ///
 /// Wraps any [`Transport`] and speaks the Fluke Connect GATT profile over
-/// it. Obtain one from the built-in backend with
-/// [`Adapter::connect`](crate::backend::Adapter::connect), or construct it
-/// directly over your own transport with [`FlukeDevice::new`].
+/// it. Obtain one from the built-in backend with `backend::Adapter::connect`
+/// (feature `ble`), or construct it directly over your own transport with
+/// [`FlukeDevice::new`].
 #[derive(Debug)]
 pub struct FlukeDevice<T> {
     /// The underlying GATT connection.
@@ -111,15 +111,9 @@ impl<T: Transport> FlukeDevice<T> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the read fails.
+    /// Returns an error if the read fails or returns no data.
     pub async fn battery_level(&self) -> Result<u8> {
-        let bytes = self.transport.read(uuids::BATTERY_LEVEL).await?;
-        bytes.first().copied().ok_or(Error::Protocol(
-            crate::protocol::ProtocolError::InvalidLength {
-                expected: 1,
-                actual: 0,
-            },
-        ))
+        first_byte(&self.transport.read(uuids::BATTERY_LEVEL).await?)
     }
 
     /// Subscribes to battery level changes.
@@ -128,14 +122,9 @@ impl<T: Transport> FlukeDevice<T> {
     ///
     /// Returns an error if the subscription cannot be established.
     pub async fn battery_updates(&self) -> Result<BoxStream<'static, u8>> {
-        let notifications = self.transport.notifications().await?;
-        self.transport.subscribe(uuids::BATTERY_LEVEL).await?;
-        Ok(notifications
-            .filter_map(|n| async move {
-                (n.characteristic == uuids::BATTERY_LEVEL)
-                    .then(|| n.value.first().copied())
-                    .flatten()
-            })
+        let values = self.subscribed(uuids::BATTERY_LEVEL).await?;
+        Ok(values
+            .filter_map(|value| async move { value.first().copied() })
             .boxed())
     }
 
@@ -143,10 +132,9 @@ impl<T: Transport> FlukeDevice<T> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the read fails.
+    /// Returns an error if the read fails or returns no data.
     pub async fn id_number(&self) -> Result<u8> {
-        let bytes = self.transport.read(uuids::ID_NUMBER).await?;
-        Ok(bytes.first().copied().unwrap_or(0))
+        first_byte(&self.transport.read(uuids::ID_NUMBER).await?)
     }
 
     /// Sets the ID number shown on devices with a display.
@@ -164,7 +152,7 @@ impl<T: Transport> FlukeDevice<T> {
     ///
     /// Returns an error if the read fails or the name is not UTF-8.
     pub async fn name(&self) -> Result<String> {
-        let bytes = self.transport.read(USER_STRING).await?;
+        let bytes = self.transport.read(uuids::USER_STRING).await?;
         decode_string(&bytes)
     }
 
@@ -183,7 +171,7 @@ impl<T: Transport> FlukeDevice<T> {
         }
         Ok(self
             .transport
-            .write(USER_STRING, name.as_bytes(), true)
+            .write(uuids::USER_STRING, name.as_bytes(), true)
             .await?)
     }
 
@@ -236,10 +224,34 @@ impl<T: Transport> FlukeDevice<T> {
     async fn optional_string(&self, characteristic: u128) -> Result<Option<String>> {
         match self.transport.read(characteristic).await {
             Ok(bytes) => decode_string(&bytes).map(Some),
-            Err(crate::transport::TransportError::CharacteristicNotFound(_)) => Ok(None),
+            Err(TransportError::CharacteristicNotFound(_)) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Opens the notification stream, enables notifications on one
+    /// characteristic (in that order, so no early notification is lost) and
+    /// returns only that characteristic's values.
+    async fn subscribed(&self, characteristic: u128) -> Result<BoxStream<'static, Vec<u8>>> {
+        let notifications = self.transport.notifications().await?;
+        self.transport.subscribe(characteristic).await?;
+        Ok(notifications
+            .filter_map(
+                move |n| async move { (n.characteristic == characteristic).then_some(n.value) },
+            )
+            .boxed())
+    }
+}
+
+/// Extracts the single byte of a one-byte characteristic value.
+fn first_byte(bytes: &[u8]) -> Result<u8> {
+    bytes
+        .first()
+        .copied()
+        .ok_or(Error::Protocol(ProtocolError::InvalidLength {
+            expected: 1,
+            actual: 0,
+        }))
 }
 
 /// Decodes a device string, trimming the NUL padding and trailing spaces

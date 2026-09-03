@@ -8,7 +8,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  RUSTDOCFLAGS: -D warnings --cfg docsrs
+  RUSTDOCFLAGS: -D warnings
 
 jobs:
   test:
@@ -33,6 +33,9 @@ jobs:
       - run: cargo test --all-features
       - run: cargo test --no-default-features
       - run: cargo build --all-features --examples --bins
+      # Intra-doc links must resolve in every feature subset, not just docs.rs.
+      - run: cargo doc --no-default-features --no-deps
+      - run: cargo doc --no-default-features --features std --no-deps
 
   msrv:
     name: MSRV
@@ -40,9 +43,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-features --all-targets
+      # `+1.88` overrides rust-toolchain.toml, which pins stable.
+      - run: cargo +1.88 check --all-features --all-targets
 
   no-std:
     name: no_std protocol build
@@ -63,7 +67,10 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --all-features --no-deps
+      # `+nightly` overrides rust-toolchain.toml; `--cfg docsrs` mirrors docs.rs.
+      - run: cargo +nightly doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings --cfg docsrs
 
   deny:
     name: cargo-deny
@@ -79,8 +86,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
-      - name: Fail if unexpected files would be published
+      - name: Fail if the published file list changed without review
         run: |
-          cargo package --list --allow-dirty > packaged.txt
-          cat packaged.txt
-          ! grep -E '(^|/)(CLAUDE|MEMORY|INSTRUCTIONS|REQUIREMENTS)\.md$|^\.claude/|^\.venv/|^captures/' packaged.txt
+          cargo package --list --allow-dirty | LC_ALL=C sort > packaged.txt
+          diff -u .github/expected-package-files.txt packaged.txt
