@@ -40,7 +40,7 @@ const MANTISSA_MASK: u32 = 0x1F_FFFF;
 /// accessors so that the wire representation can evolve without breaking
 /// callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Reading {
     /// Signed mantissa (`-0x1F_FFFF..=0x1F_FFFF`).
     mantissa: i32,
@@ -205,9 +205,8 @@ impl Reading {
     /// Returns `None` when [`has_value`](Self::has_value) is false.
     #[must_use]
     pub fn display_value(&self) -> Option<f64> {
-        self.has_value().then(|| {
-            f64::from(self.mantissa) / pow10(i8::try_from(self.decimal_places).unwrap_or(0))
-        })
+        self.has_value()
+            .then(|| f64::from(self.mantissa) / pow10(self.decimal_places))
     }
 
     /// The value converted to the unit's SI base (for example `0.546` for
@@ -226,23 +225,16 @@ impl Reading {
 
 impl fmt::Display for Reading {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let suffix = UnitSuffix(self);
+        if let Some(value) = self.display_value() {
+            let places = usize::from(self.decimal_places);
+            return write!(f, "{value:.places$} {suffix}");
+        }
         match self.state {
-            ReadingState::Normal if self.has_value() => {
-                let places = usize::from(self.decimal_places);
-                let value = self.display_value().unwrap_or(0.0);
-                write!(
-                    f,
-                    "{value:.places$} {}{}",
-                    self.magnitude.symbol(),
-                    self.unit.symbol()
-                )
-            }
             ReadingState::Normal | ReadingState::Blank | ReadingState::Empty => {
-                write!(f, "---- {}{}", self.magnitude.symbol(), self.unit.symbol())
+                write!(f, "---- {suffix}")
             }
-            ReadingState::OverRange | ReadingState::OverloadA2d => {
-                write!(f, "OL {}{}", self.magnitude.symbol(), self.unit.symbol())
-            }
+            ReadingState::OverRange | ReadingState::OverloadA2d => write!(f, "OL {suffix}"),
             ReadingState::Inactive
             | ReadingState::Invalid
             | ReadingState::OpenThermocouple
@@ -257,6 +249,15 @@ impl fmt::Display for Reading {
     }
 }
 
+/// Formats the SI prefix and unit symbol of a reading, for example `mV DC`.
+struct UnitSuffix<'a>(&'a Reading);
+
+impl fmt::Display for UnitSuffix<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", self.0.magnitude.symbol(), self.0.unit.symbol())
+    }
+}
+
 /// Extracts the low byte of a value already masked to fit in 8 bits.
 const fn low_byte(value: u32) -> u8 {
     let [b0, _, _, _] = value.to_le_bytes();
@@ -268,25 +269,24 @@ const fn low_byte(value: u32) -> u8 {
 /// allows.
 fn scale(value: f64, exp: i8) -> f64 {
     if exp < 0 {
-        value / pow10(exp.saturating_neg())
+        value / pow10(exp.unsigned_abs())
     } else {
-        value * pow10(exp)
+        value * pow10(exp.unsigned_abs())
     }
 }
 
-/// `10^|exp|` for the exponent range that can appear in a reading.
+/// `10^exp` for the exponent range that can appear in a reading.
 ///
-/// Implemented with a table so the protocol module needs no `std` or
-/// `libm` support for `powi`.
-fn pow10(exp: i8) -> f64 {
-    const POSITIVE: [f64; 19] = [
+/// The reachable range is the sum of [`Magnitude::exponent`] (-12..=9) and
+/// [`Unit::base_exponent`] (-6..=12), so the table covers 0..=22 with
+/// margin. Implemented with a table so the protocol module needs no `std`
+/// or `libm` support for `powi`.
+fn pow10(exp: u8) -> f64 {
+    const POSITIVE: [f64; 23] = [
         1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
-        1e17, 1e18,
+        1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
     ];
-    POSITIVE
-        .get(usize::from(exp.unsigned_abs()))
-        .copied()
-        .unwrap_or(f64::NAN)
+    POSITIVE.get(usize::from(exp)).copied().unwrap_or(f64::NAN)
 }
 
 #[cfg(test)]
@@ -298,20 +298,13 @@ fn pow10(exp: i8) -> f64 {
 )]
 mod tests {
     use std::string::ToString as _;
-    use std::vec::Vec;
 
     use super::{NO_VALUE_MANTISSA, Reading, pow10, scale};
     use crate::protocol::enums::{Function, Magnitude, ReadingState, Unit};
 
     /// Decodes a hex string into a reading.
     fn reading(hex: &str) -> Reading {
-        let bytes: Vec<u8> = (0..hex.len())
-            .step_by(2)
-            .map(|i| {
-                u8::from_str_radix(hex.get(i..i.saturating_add(2)).unwrap_or("00"), 16).unwrap_or(0)
-            })
-            .collect();
-        Reading::from_bytes(&bytes).unwrap_or_else(|e| panic!("{e}"))
+        Reading::from_bytes(&crate::protocol::test_hex(hex)).unwrap_or_else(|e| panic!("{e}"))
     }
 
     #[test]
@@ -409,6 +402,15 @@ mod tests {
     fn wrong_length_is_an_error() {
         assert!(Reading::from_bytes(&[0; 7]).is_err());
         assert!(Reading::from_bytes(&[0; 9]).is_err());
+    }
+
+    #[test]
+    fn giga_tera_ohms_stay_finite() {
+        // Magnitude Giga (1) with unit TeraOhms (44): the largest exponent.
+        let r = reading("0100001c2c280000");
+        assert_eq!(r.magnitude(), Magnitude::Giga);
+        assert_eq!(r.unit(), Unit::TeraOhms);
+        assert!(r.value().is_some_and(f64::is_finite));
     }
 
     #[test]

@@ -12,7 +12,7 @@ use futures_util::StreamExt as _;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let adapter = Adapter::default().await?;
+    let adapter = Adapter::open().await?;
     eprintln!("scanning (hold the adapter's button until its LED flashes)...");
     let device = adapter.connect_first(Duration::from_secs(90)).await?;
 

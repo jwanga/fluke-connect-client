@@ -26,7 +26,7 @@ async fn streams_readings_from_a_real_device() {
         eprintln!("FLUKE_CONNECT_HW is not set; skipping");
         return;
     }
-    let adapter = Adapter::default().await.expect("adapter");
+    let adapter = Adapter::open().await.expect("adapter");
     let device = adapter
         .connect_first(Duration::from_secs(90))
         .await
@@ -38,15 +38,13 @@ async fn streams_readings_from_a_real_device() {
     assert!(battery <= 100);
 
     let mut readings = device.readings().await.expect("subscribe");
-    let mut decoded = 0;
-    while decoded < 5 {
+    for _ in 0..5 {
         let next = tokio::time::timeout(Duration::from_secs(10), readings.next())
             .await
             .expect("a reading within 10 s")
             .expect("stream open");
         let reading = next.expect("decodes");
         eprintln!("{}", reading.primary());
-        decoded += 1;
     }
     device.disconnect().await.expect("disconnect");
 }

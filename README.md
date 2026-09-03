@@ -50,7 +50,7 @@ use futures_util::StreamExt as _;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let adapter = Adapter::default().await?;
+    let adapter = Adapter::open().await?;
     let device = adapter.connect_first(Duration::from_secs(60)).await?;
 
     let info = device.device_info().await?;
@@ -117,7 +117,7 @@ fluke-connect locator on          # blink the device LED
 |---------|---------|---------|
 | `std`   | yes | the async client and transport trait |
 | `ble`   | yes | the built-in btleplug transport (macOS, Linux, Windows) |
-| `serde` | no  | `Serialize` / `Deserialize` on protocol types |
+| `serde` | no  | `Serialize` on readings, `Serialize` / `Deserialize` on enums and `DeviceInfo` |
 | `cli`   | no  | the `fluke-connect` binary |
 
 With `default-features = false` the crate is `no_std` and contains only the

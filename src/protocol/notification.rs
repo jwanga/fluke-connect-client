@@ -16,7 +16,7 @@ pub const DUAL_LEN: usize = 2 * READING_LEN;
 
 /// One notification from the *Binary Reading* characteristic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ReadingNotification {
     /// The meter's primary display.
     primary: Reading,
@@ -29,7 +29,8 @@ impl ReadingNotification {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtocolError::InvalidLength`] for any other length.
+    /// Returns [`ProtocolError::InvalidLength`] for any other length; its
+    /// `expected` field reports the larger accepted length, [`DUAL_LEN`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ProtocolError> {
         match bytes.len() {
             SINGLE_LEN => Ok(Self {
@@ -74,12 +75,7 @@ mod tests {
 
     /// Decodes a hex string into bytes.
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len())
-            .step_by(2)
-            .map(|i| {
-                u8::from_str_radix(s.get(i..i.saturating_add(2)).unwrap_or("00"), 16).unwrap_or(0)
-            })
-            .collect()
+        crate::protocol::test_hex(s)
     }
 
     #[test]

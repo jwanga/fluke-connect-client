@@ -24,9 +24,6 @@ pub enum Error {
         /// Maximum length the device accepts.
         max: usize,
     },
-    /// The device dropped the connection.
-    #[error("device disconnected")]
-    Disconnected,
     /// No matching device was found before the timeout elapsed.
     #[error("no Fluke Connect device found")]
     NotFound,

@@ -6,10 +6,11 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
     clippy::unused_async_trait_impl,
     reason = "integration tests may fail loudly; the mock implements async trait methods synchronously"
 )]
+
+mod common;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -106,12 +107,7 @@ impl Transport for MockTransport {
     }
 }
 
-fn hex(s: &str) -> Vec<u8> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-        .collect()
-}
+use common::hex;
 
 #[tokio::test]
 async fn readings_stream_decodes_binary_notifications_only() {

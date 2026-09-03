@@ -18,8 +18,8 @@ proptest! {
         prop_assert_eq!(reading.raw(), &raw);
         // Every accessor and the Display impl must be total.
         let _ = reading.to_string();
-        let _ = reading.value();
-        let _ = reading.display_value();
+        prop_assert!(reading.value().is_none_or(f64::is_finite));
+        prop_assert!(reading.display_value().is_none_or(f64::is_finite));
         prop_assert!(reading.mantissa().unsigned_abs() <= 0x1F_FFFF);
         prop_assert!(reading.decimal_places() <= 7);
         prop_assert!(reading.range() <= 0x7F);
