@@ -106,4 +106,14 @@ fn capture_covers_the_interesting_states() {
             .is_some()),
         "capture lacks a populated secondary display"
     );
+    assert!(
+        records().any(|l| {
+            ReadingNotification::from_bytes(&common::hex(l))
+                .unwrap()
+                .primary()
+                .attribute()
+                == Attribute::ShortCircuit
+        }),
+        "capture lacks the continuity short-circuit attribute"
+    );
 }

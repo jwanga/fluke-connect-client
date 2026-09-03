@@ -102,7 +102,7 @@ Each 8-byte record is two little-endian 32-bit words:
 | 0 | 31 | sign | 1 = negative |
 | 1 | 0-7 | unit | see below |
 | 1 | 8-15 | function | see below |
-| 1 | 16-22 | range | 0 on the ir3000 FC / 289 |
+| 1 | 16-22 | range | 0 on the ir3000 FC / 289 (manual range changes alter decimal places instead) |
 | 1 | 23-25 | decade | 0 on the ir3000 FC / 289 |
 | 1 | 26-30 | attribute | see below |
 | 1 | 31 | capture flag | |
@@ -120,6 +120,7 @@ Worked examples from the capture:
 | `ff ff 9f 42 0f 2d 00 00` | state 4 (Over range), unit 15 (F), function 45 (Capacitance) → **OL** |
 | `ff ff 3f 22 0b 28 00 00` | state 1 (Blank), unit 11 (Ω), function 40 (Resistance) → **blank while auto-ranging** |
 | `88 13 00 06 0b 2a 00 00` | mantissa 5000, 3 decimals, unit 11 (Ω), function 42 (Low ohms) → **5.000 Ω** |
+| `d5 01 00 04 0b 27 00 08` | mantissa 469, 2 decimals, unit 11 (Ω), function 39 (Continuity), attribute 2 (Short circuit) → **4.69 Ω, beeper on** |
 
 Secondary display example: with the 289 in **V AC LoZ** the notification
 was `00 00 00 02 01 07 00 00` + `00 00 00 02 02 07 00 00`, that is
@@ -171,9 +172,12 @@ installation-tester, pressure and clamp functions. The full table is in
 `src/protocol/enums.rs`.
 
 Functions observed on the 289 through the ir3000 FC: 1, 2, 7, 11, 12, 13,
-34, 40, 42, 45, 50.
+34, 39, 40, 42, 45, 50.
 
 ### Attribute (5 bits)
+
+Observed **[verified]**: 2 (short circuit) while the 289 was in continuity
+with the leads shorted; 0 otherwise. The rest are **[documented]**.
 
 0 none, 1 open circuit, 2 short circuit, 3 glitch, 4 good diode,
 5 negative edge, 6 positive edge, 7 high current, 8 hazardous voltage,
