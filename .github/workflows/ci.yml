@@ -43,10 +43,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
-      # `+1.85` overrides rust-toolchain.toml, which pins stable.
-      - run: cargo +1.85 check --all-features --all-targets
+      # `+1.88` overrides rust-toolchain.toml, which pins stable.
+      - run: cargo +1.88 check --all-features --all-targets
 
   no-std:
     name: no_std protocol build

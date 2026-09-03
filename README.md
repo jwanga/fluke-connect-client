@@ -137,7 +137,7 @@ described in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 ## Minimum supported Rust version
 
-Rust 1.85. The MSRV may be raised in minor releases but will always be at
+Rust 1.88 (btleplug 0.13 uses let-chains on macOS and Windows). The MSRV may be raised in minor releases but will always be at
 least six months old.
 
 ## License
