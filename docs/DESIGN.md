@@ -118,9 +118,13 @@ per attempt and polled continuously.
 
 Events flow through a bounded channel; `StopHandle::stop` disconnects the
 current device and ends the stream, while dropping the stream aborts the
-task without disconnecting. Known limits: a stop that lands inside a
-connect cannot cancel the OS-side attempt, and there is no liveness
-watchdog for a link that stays up but goes silent.
+task without disconnecting. `ReconnectPolicy::idle_timeout` is an opt-in
+liveness watchdog: when no item arrives within it the supervisor
+disconnects and reconnects through a fresh scan, because `CoreBluetooth`
+can leave a link standing whose notifications have stopped. It defaults to
+`None` because silence is normal for a meter in HOLD or logging slowly, and
+only the application knows how long is too long. Known limit: a stop that
+lands inside a connect cannot cancel the OS-side attempt.
 
 ## Error handling
 
@@ -138,7 +142,9 @@ first-run failure.
    (binary wins after its first notification), and neither (error).
 3. `tests/reconnect.rs` drives the supervisor with a scripted connector
    under paused Tokio time: backoff timings, per-scan connect budget,
-   empty windows, give-up, stop and drop semantics, and per source that
+   empty windows, give-up, stop and drop semantics, the idle watchdog
+   (fires exactly at the timeout, is restarted by every item and is off
+   by default), and per source that
    `Measurements` opens both characteristics on every connection and
    retries a device that has neither, and that `BatteryUpdates` yields
    bare levels.

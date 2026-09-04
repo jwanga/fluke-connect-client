@@ -102,7 +102,10 @@ cleanly and ends the stream; the `fluke-connect stream --reconnect` command
 calls it on Ctrl-C. `Adapter::stream_with_reconnect` accepts any
 `reconnect::Source`: the built-in `Measurements`, `Readings`, `AsciiReadings`
 and `BatteryUpdates` mirror the `FlukeDevice` streams, and the trait is small
-enough to implement for your own subscription.
+enough to implement for your own subscription. `ReconnectPolicy` also has
+an opt-in `idle_timeout`: set it and a link that stays connected but stops
+delivering items is dropped and reconnected; it is off by default because a
+meter in HOLD is legitimately silent.
 
 Code that does not care which characteristic a value came from can wrap
 either in `Measurement`, which exposes what both sources can answer:
