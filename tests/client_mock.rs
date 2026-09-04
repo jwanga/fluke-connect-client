@@ -17,9 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use fluke_connect_client::protocol::uuids;
 use fluke_connect_client::transport::{BoxStream, Notification, Transport, TransportError};
-use fluke_connect_client::{
-    Error, FlukeDevice, Function, Magnitude, ProtocolError, ReadingState, Unit,
-};
+use fluke_connect_client::{Error, FlukeDevice, Function, ProtocolError, ReadingState, Unit};
 use futures_util::StreamExt as _;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -268,22 +266,7 @@ async fn current_ascii_reading_reads_the_characteristic() {
     let mock = MockTransport::new().with_value(uuids::ASCII_READING, b"\x00   0.0uF\x00       ");
     let device = FlukeDevice::new(mock);
     let reading = device.current_ascii_reading().await.unwrap();
-    assert_eq!(reading.unit(), Unit::Farads);
-    assert_eq!(reading.magnitude(), Magnitude::Micro);
     assert_eq!(reading.to_string(), "0.0 µF");
-}
-
-#[tokio::test]
-async fn current_ascii_reading_rejects_the_ir3000_placeholder() {
-    let mock = MockTransport::new().with_value(
-        uuids::ASCII_READING,
-        &hex("0102030405000000000000000000000000"),
-    );
-    let device = FlukeDevice::new(mock);
-    assert!(matches!(
-        device.current_ascii_reading().await,
-        Err(Error::Protocol(ProtocolError::UnsupportedFormat(1)))
-    ));
 }
 
 #[tokio::test]

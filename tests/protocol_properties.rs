@@ -60,7 +60,7 @@ proptest! {
 
     #[test]
     fn any_ascii_text_decodes(raw in any::<[u8; 16]>().prop_map(|a| a.map(|b| b & 0x7F))) {
-        let r = AsciiReading::from_array(raw).unwrap();
+        let r = AsciiReading::from_bytes(&raw).unwrap();
         prop_assert_eq!(r.raw(), &raw);
         prop_assert_eq!(r.text().len(), 16);
         let _ = r.to_string();
@@ -78,8 +78,8 @@ proptest! {
     fn non_ascii_bytes_are_reported(raw in any::<[u8; 16]>(), pos in 0_usize..16, high in 0x80_u8..=0xFF) {
         let mut raw = raw.map(|b| b & 0x7F);
         raw[pos] = high;
-        match AsciiReading::from_array(raw) {
-            Err(ProtocolError::NotAscii { offset }) => prop_assert!(offset <= pos),
+        match AsciiReading::from_bytes(&raw) {
+            Err(ProtocolError::NotAscii { offset }) => prop_assert_eq!(offset, pos),
             other => prop_assert!(false, "expected NotAscii, got {other:?}"),
         }
     }

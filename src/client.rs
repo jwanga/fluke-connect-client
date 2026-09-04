@@ -69,13 +69,9 @@ impl<T: Transport> FlukeDevice<T> {
     ///
     /// Returns an error if the subscription cannot be established.
     pub async fn readings(&self) -> Result<BoxStream<'static, Result<ReadingNotification>>> {
-        let notifications = self.transport.notifications().await?;
-        self.transport.subscribe(uuids::BINARY_READING).await?;
-        Ok(notifications
-            .filter_map(|n| async move {
-                (n.characteristic == uuids::BINARY_READING)
-                    .then(|| ReadingNotification::from_bytes(&n.value).map_err(Error::from))
-            })
+        let values = self.subscribed(uuids::BINARY_READING).await?;
+        Ok(values
+            .map(|value| ReadingNotification::from_bytes(&value).map_err(Error::from))
             .boxed())
     }
 
@@ -92,9 +88,9 @@ impl<T: Transport> FlukeDevice<T> {
     /// Subscribes to the ASCII display characteristic and returns a stream
     /// of decoded display strings.
     ///
-    /// The 376 FC, 902 FC and 3000 FC populate this characteristic; the
-    /// ir3000 FC exposes it but never notifies, so the stream stays silent
-    /// there. Payloads that fail to decode are yielded as errors so a
+    /// The 376 FC and 902 FC clamps populate this characteristic and other
+    /// family members may; the ir3000 FC exposes it but never notifies, so
+    /// the stream stays silent there. Payloads that fail to decode are yielded as errors so a
     /// consumer can log them without losing the stream, which ends when the
     /// connection is lost.
     ///

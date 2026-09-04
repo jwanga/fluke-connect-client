@@ -111,7 +111,7 @@ fluke-connect doctor              # adapter state and permission hints
 fluke-connect scan                # list Fluke Connect devices in range
 fluke-connect info                # device information, battery, name, ID
 fluke-connect stream              # live readings; --json for machine output
-fluke-connect stream --ascii      # the ASCII display string (376 FC, 902 FC, 3000 FC)
+fluke-connect stream --ascii      # the ASCII display string (376 FC, 902 FC and similar)
 fluke-connect dump readings.jsonl # raw notification capture for bug reports
 fluke-connect locator on          # blink the device LED
 ```

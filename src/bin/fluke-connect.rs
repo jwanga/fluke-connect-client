@@ -64,8 +64,8 @@ enum DeviceCommand {
         /// Emit one JSON object per line instead of text.
         #[arg(long)]
         json: bool,
-        /// Stream the ASCII display string (376 FC, 902 FC, 3000 FC) instead
-        /// of the binary record. Silent on an ir3000 FC.
+        /// Stream the ASCII display string (376 FC, 902 FC and similar)
+        /// instead of the binary record. Silent on an ir3000 FC.
         #[arg(long)]
         ascii: bool,
         /// Stop after this many readings.
@@ -346,7 +346,6 @@ fn ascii_json_line(reading: &AsciiReading) -> String {
     serde_json::json!({
         "ascii": {
             "display": reading.to_string(),
-            "text": reading.text(),
             "reading_text": reading.reading_text(),
             "value": reading.value(),
             "display_value": reading.display_value(),
@@ -354,13 +353,12 @@ fn ascii_json_line(reading: &AsciiReading) -> String {
             "unit": reading.unit(),
             "unit_token": reading.unit_token(),
             "magnitude": reading.magnitude(),
-            "multiplier": reading.multiplier(),
             "acdc": reading.acdc(),
             "hazardous_voltage": reading.hazardous_voltage(),
             "inrush": reading.inrush(),
             "raw": hex(reading.raw()),
         },
-        "timestamp": unix_now().map_or(0.0, |d| d.as_secs_f64()),
+        "timestamp": timestamp(),
     })
     .to_string()
 }
@@ -370,7 +368,7 @@ fn json_line(reading: &ReadingNotification) -> String {
     serde_json::json!({
         "primary": reading_json(reading.primary()),
         "secondary": reading.secondary().map(reading_json),
-        "timestamp": unix_now().map_or(0.0, |d| d.as_secs_f64()),
+        "timestamp": timestamp(),
     })
     .to_string()
 }
@@ -422,7 +420,7 @@ async fn dump(device: &FlukeDevice<BtleplugTransport>, output: &Path, seconds: u
             next = notifications.next() => {
                 let Some(n) = next else { break };
                 let line = serde_json::json!({
-                    "t": unix_now().map_or(0.0, |d| d.as_secs_f64()),
+                    "t": timestamp(),
                     "characteristic": uuid::Uuid::from_u128(n.characteristic).to_string(),
                     "hex": hex(&n.value),
                 });
@@ -434,6 +432,11 @@ async fn dump(device: &FlukeDevice<BtleplugTransport>, output: &Path, seconds: u
     file.flush().await?;
     eprintln!("wrote {written} notifications");
     Ok(())
+}
+
+/// Seconds since the UNIX epoch as a float, `0.0` if the clock is unusable.
+fn timestamp() -> f64 {
+    unix_now().map_or(0.0, |d| d.as_secs_f64())
 }
 
 /// Time since the UNIX epoch.

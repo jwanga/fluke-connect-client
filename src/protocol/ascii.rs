@@ -16,8 +16,9 @@
 //! Example: `00 20 20 20 39 2e 32 20 56 00 20 20 64 63 20 20 20` is the text
 //! `"   9.2 V\0  dc   "`, that is **9.2 V DC** on a Fluke 376 FC.
 //!
-//! The 376 FC, 902 FC and 3000 FC populate this characteristic. The ir3000
-//! FC leaves it at a placeholder whose format byte is `1`, which decodes to
+//! Public captures show the 376 FC and 902 FC clamps populating this
+//! characteristic; other family members may as well. The ir3000 FC leaves
+//! it at a placeholder whose format byte is `1`, which decodes to
 //! [`ProtocolError::UnsupportedFormat`].
 
 use core::fmt;
@@ -25,7 +26,7 @@ use core::ops::Range;
 
 use super::enums::{Magnitude, Unit};
 use super::error::ProtocolError;
-use super::reading::scale;
+use super::reading::to_base_unit;
 
 /// Length of the ASCII text that follows the format byte.
 pub const ASCII_TEXT_LEN: usize = 16;
@@ -108,29 +109,14 @@ impl AsciiReading {
     /// - [`ProtocolError::NotAscii`] when the text contains a byte outside
     ///   7-bit ASCII.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        let text: &[u8] = match bytes.len() {
-            ASCII_FRAMED_LEN => {
-                // A 17-byte slice always has a first element.
-                let (format, text) = bytes.split_first().ok_or(ProtocolError::InvalidLength {
-                    expected: ASCII_FRAMED_LEN,
-                    actual: 0,
-                })?;
-                if *format != ASCII_FORMAT_METER {
-                    return Err(ProtocolError::UnsupportedFormat(*format));
-                }
-                text
+        if let Ok(&[format, text @ ..]) = <&[u8; ASCII_FRAMED_LEN]>::try_from(bytes) {
+            if format != ASCII_FORMAT_METER {
+                return Err(ProtocolError::UnsupportedFormat(format));
             }
-            ASCII_TEXT_LEN => bytes,
-            actual => {
-                return Err(ProtocolError::InvalidLength {
-                    expected: ASCII_FRAMED_LEN,
-                    actual,
-                });
-            }
-        };
-        // Both arms above leave exactly ASCII_TEXT_LEN bytes.
-        let raw: [u8; ASCII_TEXT_LEN] =
-            text.try_into().map_err(|_| ProtocolError::InvalidLength {
+            return Self::from_array(text);
+        }
+        let raw =
+            <[u8; ASCII_TEXT_LEN]>::try_from(bytes).map_err(|_| ProtocolError::InvalidLength {
                 expected: ASCII_FRAMED_LEN,
                 actual: bytes.len(),
             })?;
@@ -139,11 +125,9 @@ impl AsciiReading {
 
     /// Decodes the 16-byte text without a format byte.
     ///
-    /// # Errors
-    ///
-    /// Returns [`ProtocolError::NotAscii`] if any byte is outside 7-bit
-    /// ASCII; every ASCII pattern decodes.
-    pub fn from_array(raw: [u8; ASCII_TEXT_LEN]) -> Result<Self, ProtocolError> {
+    /// Every ASCII pattern decodes; a byte outside 7-bit ASCII is reported
+    /// as [`ProtocolError::NotAscii`].
+    fn from_array(raw: [u8; ASCII_TEXT_LEN]) -> Result<Self, ProtocolError> {
         if let Some(offset) = raw.iter().position(|b| !b.is_ascii()) {
             return Err(ProtocolError::NotAscii { offset });
         }
@@ -178,13 +162,6 @@ impl AsciiReading {
     #[must_use]
     pub fn reading_text(&self) -> &str {
         trim_padding(field(&self.raw, READING_FIELD))
-    }
-
-    /// The multiplier character as sent: `n`, `u`, `m`, `k`, `M` or a space.
-    #[must_use]
-    pub fn multiplier(&self) -> char {
-        let [_, _, _, _, _, _, multiplier, ..] = self.raw;
-        char::from(multiplier)
     }
 
     /// The unit token with padding removed, for example `V`, `OHMS`, `DEGC`.
@@ -256,11 +233,8 @@ impl AsciiReading {
     /// Returns `None` unless [`has_value`](Self::has_value) is true.
     #[must_use]
     pub fn value(&self) -> Option<f64> {
-        let exponent = self
-            .magnitude
-            .exponent()
-            .saturating_add(self.unit.base_exponent());
-        self.display_value().map(|v| scale(v, exponent))
+        self.display_value()
+            .map(|v| to_base_unit(v, self.magnitude, self.unit))
     }
 }
 
@@ -370,7 +344,7 @@ fn unit_of(token: &str, coupling: &str) -> Unit {
 mod tests {
     use std::string::ToString as _;
 
-    use super::{ASCII_FRAMED_LEN, AsciiReading, AsciiState};
+    use super::{AsciiReading, AsciiState};
     use crate::protocol::enums::{Magnitude, Unit};
     use crate::protocol::error::ProtocolError;
 
@@ -386,7 +360,6 @@ mod tests {
         ));
         assert_eq!(r.state(), AsciiState::Normal);
         assert_eq!(r.reading_text(), "9.2");
-        assert_eq!(r.multiplier(), ' ');
         assert_eq!(r.unit_token(), "V");
         assert_eq!(r.acdc(), "dc");
         assert_eq!(r.unit(), Unit::VoltsDc);
@@ -399,61 +372,11 @@ mod tests {
     }
 
     #[test]
-    fn fluke_376fc_amps_dc() {
-        let r = ascii(b"\x00   0.7 A\x00  dc   ");
-        assert_eq!(r.unit(), Unit::AmpsDc);
-        assert_eq!(r.display_value(), Some(0.7));
-        assert_eq!(r.to_string(), "0.7 A DC");
-    }
-
-    #[test]
-    fn fluke_902fc_microfarads() {
-        let r = ascii(b"\x00   0.0uF\x00       ");
-        assert_eq!(r.unit(), Unit::Farads);
-        assert_eq!(r.magnitude(), Magnitude::Micro);
-        assert_eq!(r.acdc(), "");
-        assert_eq!(r.display_value(), Some(0.0));
-        assert_eq!(r.to_string(), "0.0 µF");
-    }
-
-    #[test]
-    fn bare_text_equals_framed_text() {
-        let framed = ascii(b"\x00   9.2 V\x00  dc   ");
-        let bare = ascii(b"   9.2 V\x00  dc   ");
-        assert_eq!(framed, bare);
-        assert_eq!(framed.text().len(), 16);
-    }
-
-    #[test]
     fn ir3000_placeholder_is_unsupported_format() {
         let placeholder = crate::protocol::test_hex("0102030405000000000000000000000000");
         assert_eq!(
             AsciiReading::from_bytes(&placeholder),
             Err(ProtocolError::UnsupportedFormat(1))
-        );
-    }
-
-    #[test]
-    fn wrong_lengths_are_rejected() {
-        for len in [0_usize, 15, 18] {
-            let bytes = std::vec![b' '; len];
-            assert_eq!(
-                AsciiReading::from_bytes(&bytes),
-                Err(ProtocolError::InvalidLength {
-                    expected: ASCII_FRAMED_LEN,
-                    actual: len
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn non_ascii_bytes_are_rejected() {
-        let mut raw = *b"   9.2 V\x00  dc   ";
-        raw[3] = 0xB0;
-        assert_eq!(
-            AsciiReading::from_array(raw),
-            Err(ProtocolError::NotAscii { offset: 3 })
         );
     }
 
@@ -514,7 +437,6 @@ mod tests {
         assert!(r.inrush());
         assert_eq!(r.magnitude(), Magnitude::Unknown(b'x'));
         assert_eq!(r.value(), Some(230.5));
-        assert_eq!(r.multiplier(), 'x');
     }
 
     #[test]

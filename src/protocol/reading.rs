@@ -229,11 +229,8 @@ impl Reading {
     /// Returns `None` when [`has_value`](Self::has_value) is false.
     #[must_use]
     pub fn value(&self) -> Option<f64> {
-        let exponent = self
-            .magnitude
-            .exponent()
-            .saturating_add(self.unit.base_exponent());
-        self.display_value().map(|v| scale(v, exponent))
+        self.display_value()
+            .map(|v| to_base_unit(v, self.magnitude, self.unit))
     }
 }
 
@@ -278,10 +275,19 @@ const fn low_byte(value: u32) -> u8 {
     b0
 }
 
+/// Converts a displayed value to the unit's SI base by applying the SI
+/// prefix and the unit's own base exponent.
+pub(super) fn to_base_unit(display: f64, magnitude: Magnitude, unit: Unit) -> f64 {
+    scale(
+        display,
+        magnitude.exponent().saturating_add(unit.base_exponent()),
+    )
+}
+
 /// Multiplies `value` by `10^exp`, dividing for negative exponents so that
 /// results such as `52 / 1000` stay as close to the decimal value as `f64`
 /// allows.
-pub(super) fn scale(value: f64, exp: i8) -> f64 {
+fn scale(value: f64, exp: i8) -> f64 {
     if exp < 0 {
         value / pow10(exp.unsigned_abs())
     } else {
@@ -295,7 +301,7 @@ pub(super) fn scale(value: f64, exp: i8) -> f64 {
 /// [`Unit::base_exponent`] (-6..=12), so the table covers 0..=22 with
 /// margin. Implemented with a table so the protocol module needs no `std`
 /// or `libm` support for `powi`.
-pub(super) fn pow10(exp: u8) -> f64 {
+fn pow10(exp: u8) -> f64 {
     const POSITIVE: [f64; 23] = [
         1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
         1e17, 1e18, 1e19, 1e20, 1e21, 1e22,

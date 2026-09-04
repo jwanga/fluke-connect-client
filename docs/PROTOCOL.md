@@ -51,7 +51,7 @@ follows the Bluetooth SIG convention: `18xx` services, `29xx` characteristics.
 | Slot | Kind | Name | Properties | Status |
 |------|------|------|------------|--------|
 | 1800 | service | Reading | | **[verified]** |
-| 2901 | char | ASCII display (17 B: format byte + 16 ASCII) | read, notify | placeholder with format byte 1 on ir3000 FC **[verified]**; populated on 376 FC / 902 FC **[documented, public captures]** |
+| 2901 | char | ASCII display (17 B: format byte + 16 ASCII) | read, notify | placeholder with format byte 1 on ir3000 FC **[verified]**; populated on 376 FC / 902 FC **[documented, public captures]**; other family members unconfirmed |
 | 290F | char | Binary reading (8 or 16 B) | read, notify | **[verified]** |
 | 1801 | service | Connection | | **[verified]** |
 | 2902 | char | ID number (u8) | read, write | **[verified]** reads 0 |
@@ -188,8 +188,9 @@ with the leads shorted; 0 otherwise. The rest are **[documented]**.
 
 The characteristic value is **17 bytes**: a format byte followed by 16 ASCII
 characters. Format `0x00` is the "meter style" layout below; the developer
-guide marks `1` as unassigned. Three public captures (two from a 376 FC, one
-from a 902 FC) all carry format `0x00`.
+guide marks `1` as unassigned. Two public hardware captures from a 376 FC
+carry format `0x00`; a third sample, from a 902 FC decoder test, was
+re-padded to the same layout.
 
 | Offset | Len | Field      | Contents |
 |--------|-----|------------|----------|
