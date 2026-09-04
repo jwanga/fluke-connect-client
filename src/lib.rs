@@ -18,6 +18,8 @@
 //!   readings and exposes the housekeeping characteristics.
 //! - `backend` (feature `ble`): the built-in
 //!   [btleplug](https://crates.io/crates/btleplug) transport.
+//! - `reconnect` (feature `ble`): a supervised reading stream that re-scans
+//!   and reconnects with backoff when the connection drops.
 //!
 //! # Hardware note
 //!
@@ -47,6 +49,9 @@ pub mod transport;
 #[cfg(feature = "ble")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ble")))]
 pub mod backend;
+#[cfg(feature = "ble")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ble")))]
+pub mod reconnect;
 
 #[cfg(feature = "std")]
 pub use client::{DeviceInfo, FlukeDevice};

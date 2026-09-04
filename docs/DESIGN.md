@@ -22,6 +22,7 @@
 │ fluke-connect (CLI, feature "cli")   examples/stream.rs     │
 ├─────────────────────────────────────────────────────────────┤
 │ backend::Adapter / BtleplugTransport  (feature "ble")       │
+│ reconnect::ReconnectingReadings       (feature "ble")       │
 ├─────────────────────────────────────────────────────────────┤
 │ client::FlukeDevice<T: Transport>     (feature "std")       │
 │ transport::Transport trait                                  │
@@ -73,9 +74,28 @@ btleplug notification stream merged with the adapter's disconnect events so
 it terminates on disconnect. No btleplug or tokio types appear in the public
 API, so the backend can change or gain siblings without a breaking release.
 
-Reconnection is left to the application in 0.x. The recommended pattern is
-to scan again and connect to a fresh peripheral, which is also the documented
-workaround for a btleplug CoreBluetooth quirk.
+### reconnect
+
+`ReconnectingReadings` is a supervisor task that finds the device, connects,
+streams readings and starts over when the link drops. It is generic over a
+two-method `Connector` trait (`find` for one scan window, `connect` for one
+attempt) so the policy is testable with a scripted connector under paused
+Tokio time; `Adapter::readings_with_reconnect` supplies the real one.
+
+Every reconnection goes through a fresh scan on purpose: after a
+disconnect, btleplug on CoreBluetooth keeps a stale peripheral whose
+notification stream is silent forever, so the connector forgets cached
+peripherals and re-finds the device by address. Scan windows repeat at a
+fixed length because the device sets the pace by advertising; empty
+windows repeat immediately, while scan errors and connect failures back
+off (1 s doubling to 15 s with full jitter, then back to scanning). The adapter's event broadcast is shallow, so it is subscribed
+per attempt and polled continuously.
+
+Events flow through a bounded channel; `StopHandle::stop` disconnects the
+current device and ends the stream, while dropping the stream aborts the
+task without disconnecting. Known limits: a stop that lands inside a
+connect cannot cancel the OS-side attempt, and there is no liveness
+watchdog for a link that stays up but goes silent.
 
 ## Error handling
 
@@ -89,10 +109,14 @@ first-run failure.
 1. Protocol unit tests with byte fixtures from real captures and from
    published pc3000 FC logs, plus round-trip tests over every enum code.
 2. `tests/client_mock.rs` drives the client through an in-memory transport.
-3. `tests/hardware.rs` is `#[ignore]` and additionally gated on
+3. `tests/reconnect.rs` drives the supervisor with a scripted connector
+   under paused Tokio time: backoff timings, per-scan connect budget,
+   empty windows, give-up, stop and drop semantics.
+4. `tests/hardware.rs` is `#[ignore]` and additionally gated on
    `FLUKE_CONNECT_HW=1`; it connects to a real device and checks the first
-   readings decode.
-4. CI builds the protocol layer for `thumbv7em-none-eabihf` to prove it is
+   readings decode. A second test, gated on `FLUKE_CONNECT_HW_POWERCYCLE=1`,
+   expects the reconnecting stream to survive a power cycle of the device.
+5. CI builds the protocol layer for `thumbv7em-none-eabihf` to prove it is
    `no_std`, and checks the package file list so no local files ship.
 
 ## Public repository hygiene

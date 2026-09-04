@@ -6,108 +6,18 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::unused_async_trait_impl,
     reason = "integration tests may fail loudly; the mock implements async trait methods synchronously"
 )]
 
 mod common;
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
 use fluke_connect_client::protocol::uuids;
-use fluke_connect_client::transport::{BoxStream, Notification, Transport, TransportError};
+use fluke_connect_client::transport::TransportError;
 use fluke_connect_client::{Error, FlukeDevice, Function, ProtocolError, ReadingState, Unit};
 use futures_util::StreamExt as _;
-use tokio::sync::broadcast;
-use tokio_stream::wrappers::BroadcastStream;
-
-/// One recorded write: characteristic, value, with-response flag.
-type Write = (u128, Vec<u8>, bool);
-
-/// Scripted transport that records writes and replays notifications.
-#[derive(Debug, Clone)]
-struct MockTransport {
-    /// Values returned by `read`, keyed by characteristic.
-    values: Arc<Mutex<HashMap<u128, Vec<u8>>>>,
-    /// Every write that was performed, in order.
-    writes: Arc<Mutex<Vec<Write>>>,
-    /// Characteristics that were subscribed to.
-    subscriptions: Arc<Mutex<Vec<u128>>>,
-    /// Channel used to inject notifications.
-    tx: broadcast::Sender<Notification>,
-}
-
-impl MockTransport {
-    fn new() -> Self {
-        let (tx, _) = broadcast::channel(64);
-        Self {
-            values: Arc::default(),
-            writes: Arc::default(),
-            subscriptions: Arc::default(),
-            tx,
-        }
-    }
-
-    fn with_value(self, characteristic: u128, value: &[u8]) -> Self {
-        self.values
-            .lock()
-            .unwrap()
-            .insert(characteristic, value.to_vec());
-        self
-    }
-
-    fn notify(&self, characteristic: u128, value: &[u8]) {
-        self.tx
-            .send(Notification {
-                characteristic,
-                value: value.to_vec(),
-            })
-            .unwrap();
-    }
-}
-
-impl Transport for MockTransport {
-    async fn read(&self, characteristic: u128) -> Result<Vec<u8>, TransportError> {
-        self.values
-            .lock()
-            .unwrap()
-            .get(&characteristic)
-            .cloned()
-            .ok_or(TransportError::CharacteristicNotFound(characteristic))
-    }
-
-    async fn write(
-        &self,
-        characteristic: u128,
-        value: &[u8],
-        with_response: bool,
-    ) -> Result<(), TransportError> {
-        self.writes
-            .lock()
-            .unwrap()
-            .push((characteristic, value.to_vec(), with_response));
-        Ok(())
-    }
-
-    async fn subscribe(&self, characteristic: u128) -> Result<(), TransportError> {
-        self.subscriptions.lock().unwrap().push(characteristic);
-        Ok(())
-    }
-
-    async fn notifications(&self) -> Result<BoxStream<'static, Notification>, TransportError> {
-        let rx = self.tx.subscribe();
-        Ok(BroadcastStream::new(rx)
-            .filter_map(|r| async move { r.ok() })
-            .boxed())
-    }
-
-    async fn disconnect(&self) -> Result<(), TransportError> {
-        Ok(())
-    }
-}
 
 use common::hex;
+use common::mock::MockTransport;
 
 #[tokio::test]
 async fn readings_stream_decodes_binary_notifications_only() {

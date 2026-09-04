@@ -20,6 +20,7 @@ src/protocol/mod.rs
 src/protocol/notification.rs
 src/protocol/reading.rs
 src/protocol/uuids.rs
+src/reconnect.rs
 src/transport.rs
 tests/client_mock.rs
 tests/common/mod.rs
@@ -28,3 +29,4 @@ tests/fixtures/ascii_display_public.txt
 tests/fixtures/ir3000fc_fluke289_readings.txt
 tests/hardware.rs
 tests/protocol_properties.rs
+tests/reconnect.rs
