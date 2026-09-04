@@ -141,8 +141,8 @@ impl Reading {
     /// `true` when every byte of the record is zero, which is how the device
     /// marks an unused reading slot (for example an empty secondary display).
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.raw == [0; READING_LEN]
+    pub const fn is_empty(&self) -> bool {
+        u64::from_le_bytes(self.raw) == 0
     }
 
     /// Signed integer mantissa before the decimal point is applied.
@@ -209,8 +209,9 @@ impl Reading {
     /// [`ReadingState::Normal`] and the mantissa is not the "no value"
     /// sentinel.
     #[must_use]
-    pub fn has_value(&self) -> bool {
-        self.state == ReadingState::Normal && self.mantissa.unsigned_abs() != NO_VALUE_MANTISSA
+    pub const fn has_value(&self) -> bool {
+        matches!(self.state, ReadingState::Normal)
+            && self.mantissa.unsigned_abs() != NO_VALUE_MANTISSA
     }
 
     /// The value as shown on the meter display, in `magnitude`-prefixed

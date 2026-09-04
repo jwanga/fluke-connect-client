@@ -94,6 +94,10 @@ while let Some(event) = events.next().await {
 # Ok(()) }
 ```
 
+`events.stop_handle()` returns a cloneable handle whose `stop()` disconnects
+cleanly and ends the stream; the `fluke-connect stream --reconnect` command
+calls it on Ctrl-C.
+
 Code that does not care which characteristic a value came from can wrap
 either in `Measurement`, which exposes what both sources can answer:
 
@@ -110,10 +114,6 @@ for measurement in [binary, ascii] {
 }
 # Ok::<(), fluke_connect_client::ProtocolError>(())
 ```
-
-`events.stop_handle()` returns a cloneable handle whose `stop()` disconnects
-cleanly and ends the stream; the `fluke-connect stream --reconnect` command
-calls it on Ctrl-C.
 
 Each reading carries the display state (normal, blank, `OL`, open
 thermocouple, ...), the unit, the meter function, the SI prefix and the

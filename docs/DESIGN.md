@@ -123,9 +123,9 @@ first-run failure.
    `FLUKE_CONNECT_HW=1`; it connects to a real device and checks the first
    readings decode. A second test, gated on `FLUKE_CONNECT_HW_POWERCYCLE=1`,
    expects the reconnecting stream to survive a power cycle of the device.
-5. `tests/measurement_parity.rs` pairs eleven binary records with the ASCII
-   text of the same display and requires equal value, unit, state and
-   `Display` through `Measurement`; property tests check that wrapping a
+5. `tests/measurement_parity.rs` pairs binary records with the ASCII text
+   of the same display and requires equal value, unit, state and `Display`
+   through `Measurement`; property tests check that wrapping a
    reading changes nothing except the documented empty-slot rule.
 6. CI builds the protocol layer for `thumbv7em-none-eabihf` to prove it is
    `no_std`, and checks the package file list so no local files ship.

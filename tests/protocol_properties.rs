@@ -19,8 +19,9 @@ proptest! {
     fn any_eight_bytes_decode_and_format(raw in any::<[u8; 8]>()) {
         let reading = Reading::from_array(raw);
         prop_assert_eq!(reading.raw(), &raw);
-        // Every accessor and the Display impl must be total.
-        let _ = reading.to_string();
+        // Every accessor and the Display impl must be total, and Display
+        // never leaves a trailing space when there is no unit.
+        prop_assert!(!reading.to_string().ends_with(' '));
         prop_assert!(reading.value().is_none_or(f64::is_finite));
         prop_assert!(reading.display_value().is_none_or(f64::is_finite));
         prop_assert!(reading.mantissa().unsigned_abs() <= 0x1F_FFFF);
@@ -129,7 +130,6 @@ proptest! {
         prop_assert_eq!(m.to_string(), r.to_string());
         prop_assert_eq!(m.as_binary(), Some(&r));
         prop_assert!(m.as_ascii().is_none());
-        prop_assert!(!m.to_string().ends_with(' '));
     }
 
     #[test]
@@ -142,6 +142,8 @@ proptest! {
         prop_assert_eq!(m.unit(), a.unit());
         prop_assert_eq!(m.magnitude(), a.magnitude());
         prop_assert_eq!(m.to_string(), a.to_string());
+        prop_assert_eq!(m.as_ascii(), Some(&a));
+        prop_assert!(m.as_binary().is_none());
         let mapped = matches!(
             m.state(),
             ReadingState::Normal | ReadingState::OverRange | ReadingState::Blank | ReadingState::Invalid

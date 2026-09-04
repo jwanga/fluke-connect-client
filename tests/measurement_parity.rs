@@ -98,7 +98,6 @@ const PAIRS: [Pair; 11] = [
 
 #[test]
 fn every_pair_agrees_through_measurement() {
-    let mut count = 0;
     for pair in &PAIRS {
         let binary = Measurement::from(Reading::from_bytes(&common::hex(pair.binary)).unwrap());
         let ascii = Measurement::from(AsciiReading::from_bytes(pair.ascii).unwrap());
@@ -117,7 +116,5 @@ fn every_pair_agrees_through_measurement() {
         assert_eq!(binary.to_string(), pair.display);
         assert_eq!(ascii.to_string(), pair.display);
         assert_eq!(binary.has_value(), pair.state == ReadingState::Normal);
-        count += 1;
     }
-    assert_eq!(count, 11);
 }
