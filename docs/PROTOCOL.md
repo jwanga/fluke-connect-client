@@ -54,11 +54,11 @@ follows the Bluetooth SIG convention: `18xx` services, `29xx` characteristics.
 | 2901 | char | ASCII display (17 B: format byte + 16 ASCII) | read, notify | placeholder with format byte 1 on ir3000 FC **[verified]**; populated on 376 FC / 902 FC **[documented, public captures]**; other family members unconfirmed |
 | 290F | char | Binary reading (8 or 16 B) | read, notify | **[verified]** |
 | 1801 | service | Connection | | **[verified]** |
-| 2902 | char | ID number (u8) | read, write | **[verified]** reads 0 |
+| 2902 | char | ID number (u8) | read, write | **[verified]** writes are accepted and read back during the connection, but the value resets to 0 when the connection drops |
 | 2903 | char | User string / device name (UTF-8, ≤ 98 B) | read, write | **[verified]** reads `IR 3000 FC` |
-| 2904 | char | Force drop | write | **[verified]** write accepted, no disconnect observed within 10 s |
+| 2904 | char | Force drop | write | **[verified]** write accepted, no disconnect observed within 10 s (twice) |
 | 2905 | char | Locator LED (u8: 1 on, 0 off) | write | **[verified]** write accepted |
-| 290E | char | POSIX time (u64 LE) | write, notify | present **[verified]**, effect untested |
+| 290E | char | POSIX time (u64 LE per the guide) | write, notify | **[verified]** inert on the ir3000 FC: every write of 1 to 20 bytes is rejected with *Invalid Attribute Value Length*, reads are not permitted, and no notification was seen in 40 s of listening |
 | 2911 | char | Host firmware update control point | read, write, write-no-rsp, notify | present, **not used by this crate** |
 | 2912 | char | Host firmware update buffer | write, write-no-rsp | present, **not used by this crate** |
 | 1804 | service | TI OAD (radio firmware) | | present, **not used by this crate** |

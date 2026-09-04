@@ -159,6 +159,9 @@ impl<T: Transport> FlukeDevice<T> {
 
     /// The ID number shown on devices with a display (`0` when unset).
     ///
+    /// On the ir3000 FC the value is per connection: it reads back after a
+    /// write but resets to `0` when the connection drops.
+    ///
     /// # Errors
     ///
     /// Returns an error if the read fails or returns no data.
@@ -218,9 +221,14 @@ impl<T: Transport> FlukeDevice<T> {
 
     /// Sets the device clock to a POSIX timestamp in seconds.
     ///
+    /// The value is written as the 8-byte little-endian integer described
+    /// in Fluke's developer guide. The ir3000 FC rejects every write to this
+    /// characteristic with an attribute-length error, so expect a transport
+    /// error there; whether other family members accept it is unverified.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the write fails.
+    /// Returns an error if the write fails or the device rejects it.
     pub async fn set_time(&self, posix_seconds: u64) -> Result<()> {
         Ok(self
             .transport
