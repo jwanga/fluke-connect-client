@@ -223,6 +223,11 @@ The ir3000 FC leaves this characteristic at the placeholder
 Its host meter, the 289, is a 50 000-count instrument whose readings need
 seven characters, which do not fit the six-character reading field.
 
+The crate's `Measurement` type presents a value from either characteristic
+through one interface. The ASCII reading field maps onto the binary state
+codes as: a number → `Normal` (0), `OL` → `OverRange` (4), an empty or
+all-dash field → `Blank` (1), anything else → `Invalid` (3).
+
 ## What the adapter talks to
 
 Behind the radio, the ir3000 FC speaks the Fluke 28x infrared serial

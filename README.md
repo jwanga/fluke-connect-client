@@ -98,6 +98,23 @@ while let Some(event) = events.next().await {
 cleanly and ends the stream; the `fluke-connect stream --reconnect` command
 calls it on Ctrl-C.
 
+Code that does not care which characteristic a value came from can wrap
+either in `Measurement`, which exposes what both sources can answer:
+
+```rust
+use fluke_connect_client::{AsciiReading, Measurement, Reading, ReadingState, Unit};
+
+let binary = Measurement::from(Reading::from_bytes(&[0x5C, 0x00, 0x00, 0x02, 0x02, 0x0C, 0x00, 0x00])?);
+let ascii = Measurement::from(AsciiReading::from_bytes(b"\x00   9.2 V\x00  dc   ")?);
+for measurement in [binary, ascii] {
+    assert_eq!(measurement.state(), ReadingState::Normal);
+    assert_eq!(measurement.unit(), Unit::VoltsDc);
+    assert_eq!(measurement.value(), Some(9.2));
+    assert_eq!(measurement.to_string(), "9.2 V DC");
+}
+# Ok::<(), fluke_connect_client::ProtocolError>(())
+```
+
 Each reading carries the display state (normal, blank, `OL`, open
 thermocouple, ...), the unit, the meter function, the SI prefix and the
 value both as displayed and converted to base units:

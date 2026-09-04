@@ -15,7 +15,7 @@ use fluke_connect_client::backend::{Adapter, BtleplugTransport, DiscoveredDevice
 use fluke_connect_client::protocol::uuids::{ASCII_READING, BINARY_READING};
 use fluke_connect_client::reconnect::{Event, ReconnectPolicy};
 use fluke_connect_client::transport::{BoxStream, Transport as _};
-use fluke_connect_client::{AsciiReading, FlukeDevice, Reading, ReadingNotification};
+use fluke_connect_client::{AsciiReading, FlukeDevice, Measurement, Reading, ReadingNotification};
 use futures_util::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 
@@ -424,20 +424,7 @@ fn text_line(reading: &ReadingNotification) -> String {
 /// Serialises an ASCII display value as one JSON line.
 fn ascii_json_line(reading: &AsciiReading) -> String {
     serde_json::json!({
-        "ascii": {
-            "display": reading.to_string(),
-            "reading_text": reading.reading_text(),
-            "value": reading.value(),
-            "display_value": reading.display_value(),
-            "state": reading.state(),
-            "unit": reading.unit(),
-            "unit_token": reading.unit_token(),
-            "magnitude": reading.magnitude(),
-            "acdc": reading.acdc(),
-            "hazardous_voltage": reading.hazardous_voltage(),
-            "inrush": reading.inrush(),
-            "raw": hex(reading.raw()),
-        },
+        "ascii": ascii_json(reading),
         "timestamp": timestamp(),
     })
     .to_string()
@@ -453,19 +440,55 @@ fn json_line(reading: &ReadingNotification) -> String {
     .to_string()
 }
 
-/// Serialises one reading.
-fn reading_json(reading: &Reading) -> serde_json::Value {
+/// The fields every measurement source can answer.
+fn measurement_json(measurement: &Measurement) -> serde_json::Value {
     serde_json::json!({
-        "display": reading.to_string(),
-        "value": reading.value(),
-        "display_value": reading.display_value(),
-        "unit": reading.unit(),
-        "function": reading.function(),
-        "state": reading.state(),
-        "attribute": reading.attribute(),
-        "magnitude": reading.magnitude(),
-        "raw": hex(reading.raw()),
+        "display": measurement.to_string(),
+        "value": measurement.value(),
+        "display_value": measurement.display_value(),
+        "unit": measurement.unit(),
+        "state": measurement.state(),
+        "magnitude": measurement.magnitude(),
     })
+}
+
+/// Serialises one binary reading: the shared fields plus the binary-only ones.
+fn reading_json(reading: &Reading) -> serde_json::Value {
+    let mut json = measurement_json(&Measurement::from(*reading));
+    extend(
+        &mut json,
+        serde_json::json!({
+            "function": reading.function(),
+            "attribute": reading.attribute(),
+            "raw": hex(reading.raw()),
+        }),
+    );
+    json
+}
+
+/// Serialises one ASCII display value: the shared fields plus the text-only ones.
+fn ascii_json(reading: &AsciiReading) -> serde_json::Value {
+    let mut json = measurement_json(&Measurement::from(*reading));
+    extend(
+        &mut json,
+        serde_json::json!({
+            "ascii_state": reading.state(),
+            "reading_text": reading.reading_text(),
+            "unit_token": reading.unit_token(),
+            "acdc": reading.acdc(),
+            "hazardous_voltage": reading.hazardous_voltage(),
+            "inrush": reading.inrush(),
+            "raw": hex(reading.raw()),
+        }),
+    );
+    json
+}
+
+/// Merges the top-level fields of `extra` into `base`.
+fn extend(base: &mut serde_json::Value, extra: serde_json::Value) {
+    if let (serde_json::Value::Object(base), serde_json::Value::Object(extra)) = (base, extra) {
+        base.extend(extra);
+    }
 }
 
 /// Writes raw notifications as JSON Lines for fixture capture.

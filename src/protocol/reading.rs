@@ -141,8 +141,8 @@ impl Reading {
     /// `true` when every byte of the record is zero, which is how the device
     /// marks an unused reading slot (for example an empty secondary display).
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.raw == [0; READING_LEN]
+    pub const fn is_empty(&self) -> bool {
+        u64::from_le_bytes(self.raw) == 0
     }
 
     /// Signed integer mantissa before the decimal point is applied.
@@ -209,8 +209,9 @@ impl Reading {
     /// [`ReadingState::Normal`] and the mantissa is not the "no value"
     /// sentinel.
     #[must_use]
-    pub fn has_value(&self) -> bool {
-        self.state == ReadingState::Normal && self.mantissa.unsigned_abs() != NO_VALUE_MANTISSA
+    pub const fn has_value(&self) -> bool {
+        matches!(self.state, ReadingState::Normal)
+            && self.mantissa.unsigned_abs() != NO_VALUE_MANTISSA
     }
 
     /// The value as shown on the meter display, in `magnitude`-prefixed
@@ -239,13 +240,13 @@ impl fmt::Display for Reading {
         let suffix = UnitSuffix(self);
         if let Some(value) = self.display_value() {
             let places = usize::from(self.decimal_places);
-            return write!(f, "{value:.places$} {suffix}");
+            return write!(f, "{value:.places$}{suffix}");
         }
         match self.state {
             ReadingState::Normal | ReadingState::Blank | ReadingState::Empty => {
-                write!(f, "---- {suffix}")
+                write!(f, "----{suffix}")
             }
-            ReadingState::OverRange | ReadingState::OverloadA2d => write!(f, "OL {suffix}"),
+            ReadingState::OverRange | ReadingState::OverloadA2d => write!(f, "OL{suffix}"),
             ReadingState::Inactive
             | ReadingState::Invalid
             | ReadingState::OpenThermocouple
@@ -260,12 +261,18 @@ impl fmt::Display for Reading {
     }
 }
 
-/// Formats the SI prefix and unit symbol of a reading, for example `mV DC`.
+/// Formats the SI prefix and unit symbol of a reading with a leading space,
+/// for example ` mV DC`; empty when the reading has neither.
 struct UnitSuffix<'a>(&'a Reading);
 
 impl fmt::Display for UnitSuffix<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.0.magnitude.symbol(), self.0.unit.symbol())
+        let prefix = self.0.magnitude.symbol();
+        let unit = self.0.unit.symbol();
+        if prefix.is_empty() && unit.is_empty() {
+            return Ok(());
+        }
+        write!(f, " {prefix}{unit}")
     }
 }
 
@@ -418,6 +425,13 @@ mod tests {
         assert_eq!(r.decimal_places(), 3);
         assert_eq!(r.display_value(), Some(5.0));
         assert_eq!(r.to_string(), "5.000 Ω");
+    }
+
+    #[test]
+    fn no_unit_prints_no_trailing_space() {
+        assert_eq!(reading("5c00000200000000").to_string(), "9.2");
+        assert_eq!(reading("ffff3f0000000000").to_string(), "----");
+        assert_eq!(reading("ffff9f0000000000").to_string(), "OL");
     }
 
     #[test]

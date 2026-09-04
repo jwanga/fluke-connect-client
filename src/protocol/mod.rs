@@ -1,5 +1,6 @@
 //! Wire-format parsing for the Fluke Connect Bluetooth Low Energy protocol:
-//! the binary reading record, the ASCII display string and the UUID table.
+//! the binary reading record, the ASCII display string, the source-agnostic
+//! [`Measurement`] view over both, and the UUID table.
 //!
 //! This module performs no I/O and only depends on `core`, so it can be unit
 //! tested with byte fixtures and used from `no_std` targets.
@@ -7,6 +8,7 @@
 pub mod ascii;
 pub mod enums;
 pub mod error;
+pub mod measurement;
 pub mod notification;
 pub mod reading;
 pub mod uuids;
@@ -14,6 +16,7 @@ pub mod uuids;
 pub use ascii::{AsciiReading, AsciiState};
 pub use enums::{Attribute, Decade, Function, Magnitude, ReadingState, Unit};
 pub use error::ProtocolError;
+pub use measurement::Measurement;
 pub use notification::ReadingNotification;
 pub use reading::Reading;
 

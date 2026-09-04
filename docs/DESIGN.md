@@ -27,7 +27,7 @@
 │ client::FlukeDevice<T: Transport>     (feature "std")       │
 │ transport::Transport trait                                  │
 ├─────────────────────────────────────────────────────────────┤
-│ protocol::{Reading, ReadingNotification, AsciiReading, ...}  │
+│ protocol::{Reading, AsciiReading, Measurement, ...}         │
 │ (core only, no_std)                                         │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -42,7 +42,14 @@ UUID table is expressed as `u128` constants so the module has no
 dependencies. `AsciiReading` parses the text display characteristic used by
 the clamp meters; `from_array` is total over ASCII input, and the 17-byte
 framed form is gated on its format byte so unknown layouts fail loudly
-instead of decoding garbage.
+instead of decoding garbage. `Measurement` is a closed `Copy` enum over
+`Reading` and `AsciiReading` exposing only what both can answer: value,
+display value, unit, magnitude, state and `Display`. Its accessors
+delegate, so parity is structural rather than re-implemented; its only own
+semantics are folding `AsciiState` onto `ReadingState` (dashes to blank,
+other text to invalid) and reporting an all-zero binary record as empty.
+Source-specific detail stays reachable through `as_binary` and `as_ascii`.
+It is the item type the auto-selecting stream will yield.
 
 ### transport
 
@@ -116,7 +123,11 @@ first-run failure.
    `FLUKE_CONNECT_HW=1`; it connects to a real device and checks the first
    readings decode. A second test, gated on `FLUKE_CONNECT_HW_POWERCYCLE=1`,
    expects the reconnecting stream to survive a power cycle of the device.
-5. CI builds the protocol layer for `thumbv7em-none-eabihf` to prove it is
+5. `tests/measurement_parity.rs` pairs binary records with the ASCII text
+   of the same display and requires equal value, unit, state and `Display`
+   through `Measurement`; property tests check that wrapping a
+   reading changes nothing except the documented empty-slot rule.
+6. CI builds the protocol layer for `thumbv7em-none-eabihf` to prove it is
    `no_std`, and checks the package file list so no local files ship.
 
 ## Public repository hygiene
