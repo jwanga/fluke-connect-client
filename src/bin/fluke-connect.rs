@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use fluke_connect_client::backend::{Adapter, BtleplugTransport, DiscoveredDevice};
 use fluke_connect_client::protocol::uuids::{ASCII_READING, BINARY_READING};
-use fluke_connect_client::reconnect::{Event, ReconnectPolicy};
+use fluke_connect_client::reconnect::{Event, ReconnectPolicy, Source};
 use fluke_connect_client::transport::{BoxStream, Transport as _};
 use fluke_connect_client::{FlukeDevice, Measurement, MeasurementNotification};
 use futures_util::StreamExt as _;
@@ -43,9 +43,10 @@ enum Switch {
     Off,
 }
 
-/// Which reading characteristic `stream` decodes.
+/// Which reading characteristic `stream` decodes; also the [`Source`] behind
+/// `--reconnect`.
 #[derive(Debug, Clone, Copy)]
-enum Source {
+enum Pick {
     /// Whatever the device exposes, locking onto the binary record once it notifies.
     Auto,
     /// The binary reading record only.
@@ -54,13 +55,36 @@ enum Source {
     Ascii,
 }
 
-impl Source {
+impl Pick {
     /// Resolves the `--binary` / `--ascii` flags; clap rejects both together.
     const fn from_flags(binary: bool, ascii: bool) -> Self {
         match (binary, ascii) {
             (true, _) => Self::Binary,
             (false, true) => Self::Ascii,
             (false, false) => Self::Auto,
+        }
+    }
+}
+
+impl Source<BtleplugTransport> for Pick {
+    type Item = fluke_connect_client::Result<MeasurementNotification>;
+
+    async fn open(
+        &self,
+        device: &FlukeDevice<BtleplugTransport>,
+    ) -> fluke_connect_client::Result<BoxStream<'static, Self::Item>> {
+        match self {
+            Self::Auto => device.measurements().await,
+            Self::Binary => Ok(device
+                .readings()
+                .await?
+                .map(|r| r.map(MeasurementNotification::from))
+                .boxed()),
+            Self::Ascii => Ok(device
+                .ascii_readings()
+                .await?
+                .map(|r| r.map(MeasurementNotification::from))
+                .boxed()),
         }
     }
 }
@@ -97,8 +121,8 @@ enum DeviceCommand {
         /// fails if the device lacks it. Silent on an ir3000 FC.
         #[arg(long, conflicts_with = "binary")]
         ascii: bool,
-        /// Re-scan and reconnect whenever the connection drops (binary record only).
-        #[arg(long, conflicts_with = "ascii")]
+        /// Re-scan and reconnect whenever the connection drops.
+        #[arg(long)]
         reconnect: bool,
         /// Stop after this many readings.
         #[arg(long)]
@@ -155,14 +179,16 @@ async fn main() -> Result<()> {
 
     if let DeviceCommand::Stream {
         json,
+        binary,
+        ascii,
         count,
         seconds,
         reconnect: true,
-        ..
     } = command
     {
         let (adapter, device) = discover(timeout, cli.device_name.as_deref()).await?;
-        return stream_reconnect(&adapter, &device, json, count, seconds).await;
+        let pick = Pick::from_flags(binary, ascii);
+        return stream_reconnect(&adapter, &device, json, pick, count, seconds).await;
     }
 
     let device = connect(timeout, cli.device_name.as_deref()).await?;
@@ -190,7 +216,7 @@ async fn run(device: &FlukeDevice<BtleplugTransport>, command: DeviceCommand) ->
             stream(
                 device,
                 json,
-                Source::from_flags(binary, ascii),
+                Pick::from_flags(binary, ascii),
                 count,
                 seconds,
             )
@@ -293,11 +319,12 @@ async fn stream_reconnect(
     adapter: &Adapter,
     device: &DiscoveredDevice,
     json: bool,
+    pick: Pick,
     count: Option<usize>,
     seconds: Option<u64>,
 ) -> Result<()> {
     eprintln!("connecting to {device} (will reconnect on loss)...");
-    let mut events = adapter.readings_with_reconnect(device, ReconnectPolicy::default());
+    let mut events = adapter.stream_with_reconnect(device, pick, ReconnectPolicy::default());
     let stop = events.stop_handle();
     let deadline = tokio::time::sleep(seconds.map_or(Duration::MAX, Duration::from_secs));
     tokio::pin!(deadline);
@@ -317,8 +344,7 @@ async fn stream_reconnect(
                     Event::Connected => eprintln!("connected"),
                     // Readings buffered before a stop are drained but not printed,
                     // so --count never overshoots.
-                    Event::Reading(reading) if !stop.is_stopped() => {
-                        let measurement = MeasurementNotification::from(reading);
+                    Event::Item(Ok(measurement)) if !stop.is_stopped() => {
                         let line = if json { json_line(&measurement) } else { text_line(&measurement) };
                         writeln!(stdout.lock(), "{line}")?;
                         seen = seen.saturating_add(1);
@@ -326,8 +352,8 @@ async fn stream_reconnect(
                             stop.stop();
                         }
                     }
-                    Event::Reading(_) => {}
-                    Event::BadReading(e) => eprintln!("bad reading: {e}"),
+                    Event::Item(Ok(_)) => {}
+                    Event::Item(Err(e)) => eprintln!("bad reading: {e}"),
                     Event::Disconnected => eprintln!("disconnected; scanning again..."),
                     Event::WaitingForDevice => {
                         eprintln!("waiting for device (hold its button until the LED flashes)...");
@@ -400,24 +426,11 @@ fn print_or_error<E: std::fmt::Display>(label: &str, value: Result<String, E>) {
 async fn stream(
     device: &FlukeDevice<BtleplugTransport>,
     json: bool,
-    source: Source,
+    pick: Pick,
     count: Option<usize>,
     seconds: Option<u64>,
 ) -> Result<()> {
-    let measurements: BoxStream<'static, fluke_connect_client::Result<MeasurementNotification>> =
-        match source {
-            Source::Auto => device.measurements().await?,
-            Source::Binary => device
-                .readings()
-                .await?
-                .map(|r| r.map(MeasurementNotification::from))
-                .boxed(),
-            Source::Ascii => device
-                .ascii_readings()
-                .await?
-                .map(|r| r.map(MeasurementNotification::from))
-                .boxed(),
-        };
+    let measurements = pick.open(device).await?;
     let mut lines =
         measurements.map(move |r| r.map(|m| if json { json_line(&m) } else { text_line(&m) }));
     let deadline = tokio::time::sleep(seconds.map_or(Duration::MAX, Duration::from_secs));
