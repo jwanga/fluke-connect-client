@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use fluke_connect_client::backend::Adapter;
-use fluke_connect_client::reconnect::{Event, ReconnectPolicy};
+use fluke_connect_client::reconnect::{Event, ReconnectPolicy, Reconnecting};
 use futures_util::StreamExt as _;
 
 /// Whether the environment opts in to hardware tests.
@@ -55,11 +55,11 @@ async fn streams_readings_from_a_real_device() {
 }
 
 /// Waits for an event matching `want`, skipping other events, within `limit`.
-async fn wait_for(
-    events: &mut fluke_connect_client::reconnect::ReconnectingReadings,
+async fn wait_for<I: std::fmt::Debug>(
+    events: &mut Reconnecting<I>,
     limit: Duration,
-    want: impl Fn(&Event) -> bool + Send + Sync,
-) -> Event {
+    want: impl Fn(&Event<I>) -> bool + Send + Sync,
+) -> Event<I> {
     tokio::time::timeout(limit, async {
         loop {
             let event = events.next().await.expect("stream still open");
@@ -85,7 +85,7 @@ async fn survives_a_device_power_cycle() {
         .find_first(Duration::from_secs(90))
         .await
         .expect("a Fluke Connect device must be advertising");
-    let mut events = adapter.readings_with_reconnect(&device, ReconnectPolicy::default());
+    let mut events = adapter.measurements_with_reconnect(&device, ReconnectPolicy::default());
     let stop = events.stop_handle();
 
     wait_for(&mut events, Duration::from_secs(60), |e| {
@@ -93,7 +93,7 @@ async fn survives_a_device_power_cycle() {
     })
     .await;
     wait_for(&mut events, Duration::from_secs(30), |e| {
-        matches!(e, Event::Reading(_))
+        matches!(e, Event::Item(Ok(_)))
     })
     .await;
     eprintln!(
@@ -108,7 +108,7 @@ async fn survives_a_device_power_cycle() {
     })
     .await;
     wait_for(&mut events, Duration::from_secs(30), |e| {
-        matches!(e, Event::Reading(_))
+        matches!(e, Event::Item(Ok(_)))
     })
     .await;
 

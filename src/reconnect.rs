@@ -1,10 +1,14 @@
-//! A reading stream that survives disconnects.
+//! A device stream that survives disconnects.
 //!
-//! [`ReconnectingReadings`] runs a supervisor task that finds the device,
-//! connects, streams readings, and starts over whenever the connection is
-//! lost: it re-scans in fixed windows (the device sets the pace by
-//! advertising), retries failed connections with exponential backoff, and
-//! never gives up unless [`ReconnectPolicy::max_attempts`] says so.
+//! [`Reconnecting`] runs a supervisor task that finds the device, connects,
+//! opens a [`Source`] on it and forwards its items, starting over whenever
+//! the connection is lost: it re-scans in fixed windows (the device sets the
+//! pace by advertising), retries failed connections with exponential
+//! backoff, and never gives up unless [`ReconnectPolicy::max_attempts`]
+//! says so. [`Readings`], [`Measurements`], [`AsciiReadings`] and
+//! [`BatteryUpdates`] are sources for the corresponding [`FlukeDevice`]
+//! subscriptions; [`ReconnectingReadings`] names the binary-record
+//! specialisation.
 //!
 //! Every reconnection goes through a fresh scan on purpose. With btleplug on
 //! `CoreBluetooth`, a peripheral handle that has disconnected once is dead:
@@ -12,9 +16,10 @@
 //! fails. Only a handle produced by a new scan works, so
 //! [`Connector::find`] is called before every reconnection attempt.
 //!
-//! The engine is generic over [`Connector`], so the policy can be tested
-//! without hardware; the built-in Bluetooth backend provides one through
-//! `backend::Adapter::readings_with_reconnect`.
+//! The engine is generic over [`Connector`] and [`Source`], so the policy
+//! can be tested without hardware; the built-in Bluetooth backend provides a
+//! connector through `backend::Adapter::stream_with_reconnect` and its
+//! `readings_with_reconnect` / `measurements_with_reconnect` shorthands.
 
 use core::convert::Infallible;
 use core::future::Future;
@@ -29,11 +34,11 @@ use tokio::task::JoinHandle;
 
 use crate::client::FlukeDevice;
 use crate::error::{Error, Result};
-use crate::protocol::ReadingNotification;
-use crate::transport::Transport;
+use crate::protocol::{AsciiReading, MeasurementNotification, ReadingNotification};
+use crate::transport::{BoxStream, Transport};
 
 /// Finds and connects to a Fluke Connect device on behalf of
-/// [`ReconnectingReadings`].
+/// [`Reconnecting`].
 ///
 /// Implementations must return a *fresh* connection each time; reusing a
 /// peripheral handle from before a disconnect does not work with btleplug.
@@ -59,7 +64,86 @@ pub trait Connector: Send + Sync + 'static {
     ) -> impl Future<Output = Result<FlukeDevice<Self::Transport>>> + Send;
 }
 
-/// Tunables for [`ReconnectingReadings`].
+/// What a [`Reconnecting`] stream subscribes to on every connection.
+///
+/// [`open`](Self::open) is called once per successful connection, after
+/// service discovery, and its stream is forwarded as [`Event::Item`]s until
+/// it ends, which the engine takes to mean the link is gone. An error from
+/// `open` counts as a failed connection attempt: the device is disconnected,
+/// the failure is backed off and the next attempt goes through a fresh scan.
+///
+/// The ready-made sources ([`Readings`], [`Measurements`],
+/// [`AsciiReadings`], [`BatteryUpdates`]) are zero-sized and cover every
+/// subscription [`FlukeDevice`] offers; implement the trait yourself to
+/// combine or transform them.
+pub trait Source<T: Transport>: Send + Sync + 'static {
+    /// What the opened stream yields.
+    type Item: Send + 'static;
+
+    /// Subscribes on a freshly connected device.
+    ///
+    /// The returned stream must end when the connection is lost, as the
+    /// [`FlukeDevice`] streams do.
+    fn open(
+        &self,
+        device: &FlukeDevice<T>,
+    ) -> impl Future<Output = Result<BoxStream<'static, Self::Item>>> + Send;
+}
+
+/// [`Source`] for [`FlukeDevice::readings`]: the binary reading record.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Readings;
+
+impl<T: Transport + 'static> Source<T> for Readings {
+    type Item = Result<ReadingNotification>;
+
+    async fn open(&self, device: &FlukeDevice<T>) -> Result<BoxStream<'static, Self::Item>> {
+        device.readings().await
+    }
+}
+
+/// [`Source`] for [`FlukeDevice::measurements`]: whichever reading
+/// characteristic the device exposes.
+///
+/// Locks onto the binary record once it notifies. Fails with
+/// [`Error::NoReadingCharacteristic`] on a device with neither
+/// characteristic, which the engine retries like any other connect failure.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Measurements;
+
+impl<T: Transport + 'static> Source<T> for Measurements {
+    type Item = Result<MeasurementNotification>;
+
+    async fn open(&self, device: &FlukeDevice<T>) -> Result<BoxStream<'static, Self::Item>> {
+        device.measurements().await
+    }
+}
+
+/// [`Source`] for [`FlukeDevice::ascii_readings`]: the ASCII display string.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AsciiReadings;
+
+impl<T: Transport + 'static> Source<T> for AsciiReadings {
+    type Item = Result<AsciiReading>;
+
+    async fn open(&self, device: &FlukeDevice<T>) -> Result<BoxStream<'static, Self::Item>> {
+        device.ascii_readings().await
+    }
+}
+
+/// [`Source`] for [`FlukeDevice::battery_updates`]: battery level in percent.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BatteryUpdates;
+
+impl<T: Transport + 'static> Source<T> for BatteryUpdates {
+    type Item = u8;
+
+    async fn open(&self, device: &FlukeDevice<T>) -> Result<BoxStream<'static, Self::Item>> {
+        device.battery_updates().await
+    }
+}
+
+/// Tunables for [`Reconnecting`].
 ///
 /// The struct is non-exhaustive, so downstream crates set fields on a
 /// default value rather than using struct-update syntax:
@@ -121,15 +205,17 @@ impl ReconnectPolicy {
 }
 
 /// One step in the life of a reconnecting stream.
+///
+/// `I` is the [`Source`]'s item type; it defaults to that of [`Readings`]
+/// so [`ReconnectingReadings`] consumers can write `Event` unqualified.
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum Event {
-    /// Connected and subscribed; readings follow.
+pub enum Event<I = Result<ReadingNotification>> {
+    /// Connected and subscribed; items follow.
     Connected,
-    /// A decoded reading.
-    Reading(ReadingNotification),
-    /// A payload that failed to decode; the connection is kept.
-    BadReading(Error),
+    /// An item from the source. For the reading sources this is a decoded
+    /// reading or a decode error; either way the connection is kept.
+    Item(I),
     /// The connection was lost; a new scan starts.
     Disconnected,
     /// A scan window passed without seeing the device; scanning again.
@@ -152,7 +238,7 @@ pub enum Event {
     },
 }
 
-/// Stops a [`ReconnectingReadings`] from anywhere.
+/// Stops a [`Reconnecting`] stream from anywhere.
 #[derive(Debug, Clone)]
 pub struct StopHandle {
     /// Shared stop flag.
@@ -175,24 +261,30 @@ impl StopHandle {
     }
 }
 
-/// A reading stream that survives disconnects. See the [module docs](self).
+/// A device stream that survives disconnects. See the [module docs](self).
 ///
+/// `I` is the item type of the [`Source`] given to [`new`](Self::new).
 /// Dropping it aborts the supervisor task *without* disconnecting the
-/// device; prefer [`StopHandle::stop`] followed by draining the stream, which
-/// disconnects cleanly.
+/// device; prefer [`StopHandle::stop`] followed by draining the stream,
+/// which disconnects cleanly.
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
-pub struct ReconnectingReadings {
+pub struct Reconnecting<I> {
     /// Events from the supervisor task.
-    rx: mpsc::Receiver<Event>,
+    rx: mpsc::Receiver<Event<I>>,
     /// The supervisor task; aborted on drop.
     task: JoinHandle<()>,
     /// Stop flag shared with the handles given out by `stop_handle`.
     stop: StopHandle,
 }
 
-impl ReconnectingReadings {
-    /// Starts supervising.
+/// [`Reconnecting`] over the binary reading record, as produced by
+/// [`Readings`] and `backend::Adapter::readings_with_reconnect`.
+pub type ReconnectingReadings = Reconnecting<Result<ReadingNotification>>;
+
+impl<I: Send + 'static> Reconnecting<I> {
+    /// Starts supervising: connects, opens `source` and forwards its items,
+    /// reconnecting whenever the link drops.
     ///
     /// `initial`, if given, is connected to before any scan; pass the device
     /// you just discovered.
@@ -200,16 +292,22 @@ impl ReconnectingReadings {
     /// # Panics
     ///
     /// Panics if called outside a Tokio runtime.
-    pub fn new<C: Connector>(
+    pub fn new<C, S>(
         connector: C,
+        source: S,
         initial: Option<C::Target>,
         policy: ReconnectPolicy,
-    ) -> Self {
+    ) -> Self
+    where
+        C: Connector,
+        S: Source<C::Transport, Item = I>,
+    {
         let (stop_tx, stop_rx) = watch::channel(false);
         let (tx, rx) = mpsc::channel(EVENT_BUFFER);
         let task = tokio::spawn(async move {
             let mut runner = Runner {
                 connector,
+                source,
                 policy,
                 tx,
                 stop: stop_rx,
@@ -231,15 +329,15 @@ impl ReconnectingReadings {
     }
 }
 
-impl Stream for ReconnectingReadings {
-    type Item = Event;
+impl<I> Stream for Reconnecting<I> {
+    type Item = Event<I>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Event>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Event<I>>> {
         self.get_mut().rx.poll_recv(cx)
     }
 }
 
-impl Drop for ReconnectingReadings {
+impl<I> Drop for Reconnecting<I> {
     fn drop(&mut self) {
         self.task.abort();
     }
@@ -255,7 +353,7 @@ const STOP_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 enum Exit {
     /// [`StopHandle::stop`] was called.
     Stopped,
-    /// The [`ReconnectingReadings`] was dropped.
+    /// The [`Reconnecting`] stream was dropped.
     ConsumerGone,
     /// [`ReconnectPolicy::max_attempts`] was reached.
     GaveUp,
@@ -263,9 +361,9 @@ enum Exit {
 
 /// How a connected session ended.
 enum Outcome {
-    /// The reading stream ended: the link is gone.
+    /// The source's stream ended: the link is gone.
     LinkLost,
-    /// Subscribing failed after the link came up; the handle is dead.
+    /// Opening the source failed after the link came up; the handle is dead.
     Failed(Error),
 }
 
@@ -295,20 +393,22 @@ async fn disconnect_quietly<T: Transport>(device: &FlukeDevice<T>) {
 }
 
 /// State owned by the supervisor task.
-struct Runner<C: Connector> {
+struct Runner<C: Connector, S: Source<C::Transport>> {
     /// Finds and connects to the device.
     connector: C,
+    /// What to subscribe to on each connection.
+    source: S,
     /// Tunables.
     policy: ReconnectPolicy,
     /// Where events go.
-    tx: mpsc::Sender<Event>,
+    tx: mpsc::Sender<Event<S::Item>>,
     /// Stop flag.
     stop: watch::Receiver<bool>,
     /// Consecutive failures since the last successful connection.
     attempts: u32,
 }
 
-impl<C: Connector> Runner<C> {
+impl<C: Connector, S: Source<C::Transport>> Runner<C, S> {
     /// The supervisor loop: scan, connect with retries, stream, repeat.
     async fn run(
         &mut self,
@@ -350,13 +450,14 @@ impl<C: Connector> Runner<C> {
         }
     }
 
-    /// Subscribes and forwards readings until the link drops.
+    /// Opens the source and forwards its items until the link drops.
     async fn session(
         &mut self,
         device: &FlukeDevice<C::Transport>,
     ) -> core::result::Result<Outcome, Exit> {
-        let mut readings = match unless_stopped(&mut self.stop, device.readings()).await? {
-            Ok(readings) => readings,
+        let open = self.source.open(device);
+        let mut items = match unless_stopped(&mut self.stop, open).await? {
+            Ok(items) => items,
             Err(error) => {
                 disconnect_quietly(device).await;
                 return Ok(Outcome::Failed(error));
@@ -365,9 +466,8 @@ impl<C: Connector> Runner<C> {
         self.attempts = 0;
         self.emit(Event::Connected).await?;
         loop {
-            match unless_stopped(&mut self.stop, readings.next()).await? {
-                Some(Ok(reading)) => self.emit(Event::Reading(reading)).await?,
-                Some(Err(error)) => self.emit(Event::BadReading(error)).await?,
+            match unless_stopped(&mut self.stop, items.next()).await? {
+                Some(item) => self.emit(Event::Item(item)).await?,
                 None => return Ok(Outcome::LinkLost),
             }
         }
@@ -428,7 +528,7 @@ impl<C: Connector> Runner<C> {
     }
 
     /// Sends an event, racing against stop and consumer loss.
-    async fn emit(&mut self, event: Event) -> core::result::Result<(), Exit> {
+    async fn emit(&mut self, event: Event<S::Item>) -> core::result::Result<(), Exit> {
         unless_stopped(&mut self.stop, self.tx.send(event))
             .await?
             .map_err(|_| Exit::ConsumerGone)
