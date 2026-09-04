@@ -16,6 +16,7 @@ src/lib.rs
 src/protocol/ascii.rs
 src/protocol/enums.rs
 src/protocol/error.rs
+src/protocol/measurement.rs
 src/protocol/mod.rs
 src/protocol/notification.rs
 src/protocol/reading.rs
@@ -28,5 +29,6 @@ tests/fixtures.rs
 tests/fixtures/ascii_display_public.txt
 tests/fixtures/ir3000fc_fluke289_readings.txt
 tests/hardware.rs
+tests/measurement_parity.rs
 tests/protocol_properties.rs
 tests/reconnect.rs

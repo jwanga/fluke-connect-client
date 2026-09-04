@@ -59,6 +59,6 @@ pub use client::{DeviceInfo, FlukeDevice};
 pub use error::{Error, Result};
 
 pub use protocol::{
-    AsciiReading, AsciiState, Attribute, Decade, Function, Magnitude, ProtocolError, Reading,
-    ReadingNotification, ReadingState, Unit,
+    AsciiReading, AsciiState, Attribute, Decade, Function, Magnitude, Measurement, ProtocolError,
+    Reading, ReadingNotification, ReadingState, Unit,
 };

@@ -8,7 +8,10 @@
     reason = "property tests may fail loudly"
 )]
 
-use fluke_connect_client::{AsciiReading, AsciiState, ProtocolError, Reading, ReadingNotification};
+use fluke_connect_client::{
+    AsciiReading, AsciiState, Measurement, ProtocolError, Reading, ReadingNotification,
+    ReadingState,
+};
 use proptest::prelude::*;
 
 proptest! {
@@ -110,5 +113,40 @@ proptest! {
         prop_assert_eq!(r.state(), AsciiState::Normal);
         let expected: f64 = number.parse().unwrap();
         prop_assert!((r.display_value().unwrap() - expected).abs() <= 1e-9);
+    }
+
+    #[test]
+    fn measurement_agrees_with_reading(raw in any::<[u8; 8]>()) {
+        prop_assume!(raw != [0; 8]);
+        let r = Reading::from_array(raw);
+        let m = Measurement::from(r);
+        prop_assert_eq!(m.has_value(), r.has_value());
+        prop_assert_eq!(m.display_value(), r.display_value());
+        prop_assert_eq!(m.value(), r.value());
+        prop_assert_eq!(m.unit(), r.unit());
+        prop_assert_eq!(m.magnitude(), r.magnitude());
+        prop_assert_eq!(m.state(), r.state());
+        prop_assert_eq!(m.to_string(), r.to_string());
+        prop_assert_eq!(m.as_binary(), Some(&r));
+        prop_assert!(m.as_ascii().is_none());
+        prop_assert!(!m.to_string().ends_with(' '));
+    }
+
+    #[test]
+    fn measurement_agrees_with_ascii(raw in any::<[u8; 16]>().prop_map(|a| a.map(|b| b & 0x7F))) {
+        let a = AsciiReading::from_bytes(&raw).unwrap();
+        let m = Measurement::from(a);
+        prop_assert_eq!(m.has_value(), a.has_value());
+        prop_assert_eq!(m.display_value(), a.display_value());
+        prop_assert_eq!(m.value(), a.value());
+        prop_assert_eq!(m.unit(), a.unit());
+        prop_assert_eq!(m.magnitude(), a.magnitude());
+        prop_assert_eq!(m.to_string(), a.to_string());
+        let mapped = matches!(
+            m.state(),
+            ReadingState::Normal | ReadingState::OverRange | ReadingState::Blank | ReadingState::Invalid
+        );
+        prop_assert!(mapped);
+        prop_assert_eq!(m.has_value(), m.state() == ReadingState::Normal);
     }
 }
