@@ -6,9 +6,9 @@
 //! pace by advertising), retries failed connections with exponential
 //! backoff, and never gives up unless [`ReconnectPolicy::max_attempts`]
 //! says so. An optional [`ReconnectPolicy::idle_timeout`] treats a link
-//! that stays up but goes silent as lost. [`Readings`], [`Measurements`], [`AsciiReadings`] and
-//! [`BatteryUpdates`] are sources for the corresponding [`FlukeDevice`]
-//! subscriptions.
+//! that stays up but goes silent as lost. [`Readings`], [`Measurements`],
+//! [`AsciiReadings`] and [`BatteryUpdates`] are sources for the
+//! corresponding [`FlukeDevice`] subscriptions.
 //!
 //! Every reconnection goes through a fresh scan on purpose. With btleplug on
 //! `CoreBluetooth`, a peripheral handle that has disconnected once is dead:
@@ -224,7 +224,8 @@ pub enum Event<I> {
     /// An item from the source. For the reading sources this is a decoded
     /// reading or a decode error; either way the connection is kept.
     Item(I),
-    /// The connection was lost; a new scan starts.
+    /// The connection was lost, or [`ReconnectPolicy::idle_timeout`] elapsed
+    /// and the link was dropped; a new scan starts.
     Disconnected,
     /// A scan window passed without seeing the device; scanning again.
     WaitingForDevice,
@@ -390,7 +391,8 @@ async fn next_item<I>(
 
 /// How a connected session ended.
 enum Outcome {
-    /// The source's stream ended: the link is gone.
+    /// The link is gone: the source's stream ended, or it went idle and
+    /// was closed.
     LinkLost,
     /// Opening the source failed after the link came up; the handle is dead.
     Failed(Error),
@@ -601,5 +603,6 @@ mod tests {
         assert_eq!(policy.initial_backoff, Duration::from_secs(1));
         assert_eq!(policy.max_backoff, Duration::from_secs(15));
         assert_eq!(policy.max_attempts, None);
+        assert_eq!(policy.idle_timeout, None);
     }
 }
