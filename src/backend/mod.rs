@@ -20,10 +20,14 @@ use uuid::Uuid;
 use crate::client::FlukeDevice;
 use crate::error::{Error, Result};
 use crate::protocol::uuids::READING_SERVICE;
+use crate::reconnect::{Connector, ReconnectPolicy, ReconnectingReadings};
 use crate::transport::{BoxStream, Notification, Transport, TransportError};
 
 /// How long [`Adapter::connect`] waits for the GATT connection.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+///
+/// The ir3000 FC advertises roughly every 10 seconds and a connection can
+/// only start on an advertisement, so this allows for several intervals.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A Fluke Connect device seen while scanning.
 #[derive(Debug, Clone)]
@@ -127,7 +131,7 @@ impl Adapter {
     ///
     /// Returns an error if scanning cannot be started.
     pub async fn scan(&self, timeout: Duration) -> Result<Vec<DiscoveredDevice>> {
-        self.scan_inner(timeout, false).await
+        self.scan_until(timeout, |_| false).await
     }
 
     /// Scans until the first Fluke Connect device appears or `timeout`
@@ -137,11 +141,51 @@ impl Adapter {
     ///
     /// Returns [`Error::NotFound`] if nothing was seen in time.
     pub async fn find_first(&self, timeout: Duration) -> Result<DiscoveredDevice> {
-        self.scan_inner(timeout, true)
+        self.scan_until(timeout, |_| true)
             .await?
             .into_iter()
             .next()
             .ok_or(Error::NotFound)
+    }
+
+    /// Scans until the device with this [`address`](DiscoveredDevice::address)
+    /// appears or `timeout` elapses, returning `None` if it was not seen.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if scanning cannot be started.
+    pub async fn find_by_address(
+        &self,
+        address: &str,
+        timeout: Duration,
+    ) -> Result<Option<DiscoveredDevice>> {
+        Ok(self
+            .scan_until(timeout, |d| d.address() == address)
+            .await?
+            .into_iter()
+            .find(|d| d.address() == address))
+    }
+
+    /// Streams readings from `device`, re-scanning and reconnecting whenever
+    /// the connection drops. See the [`reconnect`](crate::reconnect) module.
+    ///
+    /// The first attempt connects to `device` directly; every later attempt
+    /// forgets cached peripherals and scans for the device's address again,
+    /// which is what btleplug needs after a disconnect.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime.
+    pub fn readings_with_reconnect(
+        &self,
+        device: &DiscoveredDevice,
+        policy: ReconnectPolicy,
+    ) -> ReconnectingReadings {
+        let connector = AddressConnector {
+            adapter: self.clone(),
+            address: device.address.clone(),
+        };
+        ReconnectingReadings::new(connector, Some(device.clone()), policy)
     }
 
     /// Scans for the first device and connects to it.
@@ -165,10 +209,24 @@ impl Adapter {
         &self,
         device: &DiscoveredDevice,
     ) -> Result<FlukeDevice<BtleplugTransport>> {
+        self.connect_with_timeout(device, CONNECT_TIMEOUT).await
+    }
+
+    /// Connects to a discovered device with an explicit connection timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport error if the connection or service discovery
+    /// fails, or [`TransportError::Timeout`] if the link is not up in time.
+    pub async fn connect_with_timeout(
+        &self,
+        device: &DiscoveredDevice,
+        timeout: Duration,
+    ) -> Result<FlukeDevice<BtleplugTransport>> {
         let peripheral = self.inner.peripheral(&device.id).await.map_err(map_err)?;
         #[cfg(feature = "tracing")]
         tracing::debug!(device = %device, "connecting");
-        if let Err(e) = peripheral.connect_with_timeout(CONNECT_TIMEOUT).await {
+        if let Err(e) = peripheral.connect_with_timeout(timeout).await {
             // A timed-out connect can leave the attempt pending on the OS side.
             let _ = peripheral.disconnect().await;
             return Err(map_err(e).into());
@@ -189,22 +247,46 @@ impl Adapter {
         }))
     }
 
+    /// Forgets every peripheral the platform has cached.
+    ///
+    /// Required before re-scanning for a device that disconnected: on
+    /// `CoreBluetooth` btleplug otherwise keeps a stale handle whose
+    /// notification stream stays silent forever. This affects every device
+    /// known to the adapter, so callers should own the adapter exclusively.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend refuses.
+    pub async fn forget_devices(&self) -> Result<()> {
+        // Stopping first avoids `BlueZ` rejecting a later start_scan as
+        // "in progress"; a failure here is harmless.
+        let _ = self.inner.stop_scan().await;
+        Ok(self.inner.clear_peripherals().await.map_err(map_err)?)
+    }
+
     /// Shared scan loop. Filters on the Fluke reading service both in the
     /// platform filter and again on the advertisement, because `BlueZ` merges
-    /// scan filters from all D-Bus clients.
-    async fn scan_inner(
+    /// scan filters from all D-Bus clients. Stops early once `stop` returns
+    /// true for a discovered device.
+    async fn scan_until(
         &self,
         timeout: Duration,
-        stop_on_first: bool,
+        stop: impl Fn(&DiscoveredDevice) -> bool + Send,
     ) -> Result<Vec<DiscoveredDevice>> {
         let service = Uuid::from_u128(READING_SERVICE);
         let mut events = self.inner.events().await.map_err(map_err)?;
+        // `BlueZ` rejects start_scan while a previous scan is still running.
+        let _ = self.inner.stop_scan().await;
         self.inner
             .start_scan(ScanFilter {
                 services: vec![service],
             })
             .await
             .map_err(map_err)?;
+        let mut guard = ScanGuard {
+            adapter: self.inner.clone(),
+            armed: true,
+        };
 
         let mut found: Vec<DiscoveredDevice> = Vec::new();
         let deadline = tokio::time::sleep(timeout);
@@ -224,8 +306,9 @@ impl Adapter {
                         continue;
                     }
                     if let Some(device) = self.describe(&id, service).await {
+                        let done = stop(&device);
                         found.push(device);
-                        if stop_on_first {
+                        if done {
                             break;
                         }
                     }
@@ -233,6 +316,7 @@ impl Adapter {
             }
         }
         // Stopping the scan is best effort; a failure here must not hide results.
+        guard.armed = false;
         let _ = self.inner.stop_scan().await;
         Ok(found)
     }
@@ -257,6 +341,58 @@ impl Adapter {
             address,
             rssi: props.rssi,
         })
+    }
+}
+
+/// Stops a scan if the scanning future is dropped mid-window, for example
+/// when a reconnecting stream is stopped during a scan.
+struct ScanGuard {
+    /// Adapter that is scanning.
+    adapter: platform::Adapter,
+    /// Whether the scan is still running when dropped.
+    armed: bool,
+}
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let adapter = self.adapter.clone();
+            handle.spawn(async move {
+                let _ = adapter.stop_scan().await;
+            });
+        }
+    }
+}
+
+/// [`Connector`] that re-finds one device by address on every attempt.
+#[derive(Debug)]
+struct AddressConnector {
+    /// Adapter to scan and connect with.
+    adapter: Adapter,
+    /// Platform address of the device to follow.
+    address: String,
+}
+
+impl Connector for AddressConnector {
+    type Target = DiscoveredDevice;
+    type Transport = BtleplugTransport;
+
+    async fn find(&self, window: Duration) -> Result<Option<DiscoveredDevice>> {
+        // After a disconnect only a freshly scanned handle works; forgetting
+        // the cache is what makes the next scan produce one.
+        self.adapter.forget_devices().await?;
+        self.adapter.find_by_address(&self.address, window).await
+    }
+
+    async fn connect(
+        &self,
+        target: &DiscoveredDevice,
+        timeout: Duration,
+    ) -> Result<FlukeDevice<BtleplugTransport>> {
+        self.adapter.connect_with_timeout(target, timeout).await
     }
 }
 

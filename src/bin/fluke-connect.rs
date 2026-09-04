@@ -13,6 +13,7 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use fluke_connect_client::backend::{Adapter, BtleplugTransport, DiscoveredDevice};
 use fluke_connect_client::protocol::uuids::{ASCII_READING, BINARY_READING};
+use fluke_connect_client::reconnect::{Event, ReconnectPolicy};
 use fluke_connect_client::transport::{BoxStream, Transport as _};
 use fluke_connect_client::{AsciiReading, FlukeDevice, Reading, ReadingNotification};
 use futures_util::StreamExt as _;
@@ -68,6 +69,9 @@ enum DeviceCommand {
         /// instead of the binary record. Silent on an ir3000 FC.
         #[arg(long)]
         ascii: bool,
+        /// Re-scan and reconnect whenever the connection drops.
+        #[arg(long, conflicts_with = "ascii")]
+        reconnect: bool,
         /// Stop after this many readings.
         #[arg(long)]
         count: Option<usize>,
@@ -121,6 +125,18 @@ async fn main() -> Result<()> {
         Command::Device(command) => command,
     };
 
+    if let DeviceCommand::Stream {
+        json,
+        count,
+        seconds,
+        reconnect: true,
+        ..
+    } = command
+    {
+        let (adapter, device) = discover(timeout, cli.device_name.as_deref()).await?;
+        return stream_reconnect(&adapter, &device, json, count, seconds).await;
+    }
+
     let device = connect(timeout, cli.device_name.as_deref()).await?;
     let result = run(&device, command).await;
     // Always release the link: BlueZ keeps LE connections alive after the
@@ -140,6 +156,7 @@ async fn run(device: &FlukeDevice<BtleplugTransport>, command: DeviceCommand) ->
             ascii,
             count,
             seconds,
+            reconnect: _,
         } => stream(device, json, ascii, count, seconds).await,
         DeviceCommand::Dump { output, seconds } => dump(device, &output, seconds).await,
         DeviceCommand::Locator { state } => {
@@ -208,8 +225,8 @@ async fn scan(timeout: Duration) -> Result<()> {
     Ok(())
 }
 
-/// Scans for a device (optionally by name) and connects.
-async fn connect(timeout: Duration, name: Option<&str>) -> Result<FlukeDevice<BtleplugTransport>> {
+/// Scans for a device, optionally by name, without connecting.
+async fn discover(timeout: Duration, name: Option<&str>) -> Result<(Adapter, DiscoveredDevice)> {
     let adapter = Adapter::open().await?;
     eprintln!("scanning (up to {}s)...", timeout.as_secs());
     let device: DiscoveredDevice = match name {
@@ -221,10 +238,70 @@ async fn connect(timeout: Duration, name: Option<&str>) -> Result<FlukeDevice<Bt
             .find(|d| d.name().is_some_and(|n| n.contains(needle)))
             .with_context(|| format!("no device with a name containing {needle:?}"))?,
     };
+    Ok((adapter, device))
+}
+
+/// Scans for a device (optionally by name) and connects.
+async fn connect(timeout: Duration, name: Option<&str>) -> Result<FlukeDevice<BtleplugTransport>> {
+    let (adapter, device) = discover(timeout, name).await?;
     eprintln!("connecting to {device}...");
     let connected = adapter.connect(&device).await?;
     eprintln!("connected");
     Ok(connected)
+}
+
+/// Streams readings across disconnects, reporting state changes on stderr.
+async fn stream_reconnect(
+    adapter: &Adapter,
+    device: &DiscoveredDevice,
+    json: bool,
+    count: Option<usize>,
+    seconds: Option<u64>,
+) -> Result<()> {
+    eprintln!("connecting to {device} (will reconnect on loss)...");
+    let mut events = adapter.readings_with_reconnect(device, ReconnectPolicy::default());
+    let stop = events.stop_handle();
+    let deadline = tokio::time::sleep(seconds.map_or(Duration::MAX, Duration::from_secs));
+    tokio::pin!(deadline);
+    let mut seen = 0_usize;
+    let stdout = std::io::stdout();
+    loop {
+        tokio::select! {
+            () = &mut deadline, if !stop.is_stopped() => stop.stop(),
+            _ = tokio::signal::ctrl_c(), if !stop.is_stopped() => stop.stop(),
+            event = events.next() => {
+                let Some(event) = event else { break };
+                #[allow(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "Event is non-exhaustive; unknown future variants are informational"
+                )]
+                match event {
+                    Event::Connected => eprintln!("connected"),
+                    Event::Reading(reading) => {
+                        let line = if json { json_line(&reading) } else { text_line(&reading) };
+                        writeln!(stdout.lock(), "{line}")?;
+                        seen = seen.saturating_add(1);
+                        if count.is_some_and(|max| seen >= max) {
+                            stop.stop();
+                        }
+                    }
+                    Event::BadReading(e) => eprintln!("bad reading: {e}"),
+                    Event::Disconnected => eprintln!("disconnected; scanning again..."),
+                    Event::WaitingForDevice => {
+                        eprintln!("waiting for device (hold its button until the LED flashes)...");
+                    }
+                    Event::Retrying { attempt, delay, error } => {
+                        eprintln!("connect failed ({error}); retry {attempt} in {:.1}s", delay.as_secs_f64());
+                    }
+                    Event::GaveUp { attempts, last_error } => {
+                        anyhow::bail!("gave up after {attempts} attempts: {last_error}");
+                    }
+                    other => eprintln!("{other:?}"),
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Prints device information.

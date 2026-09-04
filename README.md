@@ -69,6 +69,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+To keep streaming across disconnects, use the reconnecting stream. It
+re-scans and reconnects with backoff, and reports state changes as events:
+
+```rust,no_run
+use std::time::Duration;
+
+use fluke_connect_client::backend::Adapter;
+use fluke_connect_client::reconnect::{Event, ReconnectPolicy};
+use futures_util::StreamExt as _;
+
+# #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let adapter = Adapter::open().await?;
+let device = adapter.find_first(Duration::from_secs(60)).await?;
+let mut events = adapter.readings_with_reconnect(&device, ReconnectPolicy::default());
+let stop = events.stop_handle();
+while let Some(event) = events.next().await {
+    match event {
+        Event::Reading(reading) => println!("{}", reading.primary()),
+        Event::Disconnected => eprintln!("lost the device; reconnecting"),
+        other => eprintln!("{other:?}"),
+    }
+}
+# let _ = stop; Ok(()) }
+```
+
 Each reading carries the display state (normal, blank, `OL`, open
 thermocouple, ...), the unit, the meter function, the SI prefix and the
 value both as displayed and converted to base units:
@@ -112,6 +137,7 @@ fluke-connect scan                # list Fluke Connect devices in range
 fluke-connect info                # device information, battery, name, ID
 fluke-connect stream              # live readings; --json for machine output
 fluke-connect stream --ascii      # the ASCII display string (376 FC, 902 FC and similar)
+fluke-connect stream --reconnect  # keep streaming across disconnects
 fluke-connect dump readings.jsonl # raw notification capture for bug reports
 fluke-connect locator on          # blink the device LED
 ```
@@ -125,8 +151,10 @@ fluke-connect locator on          # blink the device LED
 - **Linux:** building needs `libdbus-1-dev` and `pkg-config`; running needs
   BlueZ (`bluetoothd`).
 - **Windows:** works on Windows 10 and later with no extra setup.
-- The ir3000 FC sleeps until its button is held for about a second. It
-  advertises slowly, so allow a scan of 30 to 60 seconds.
+- The ir3000 FC sleeps until its button is held for about a second, and
+  again after roughly 20 minutes idle. It advertises slowly, so allow a scan
+  of 30 to 60 seconds. The reconnecting stream keeps scanning and picks the
+  adapter up again when its button is pressed.
 
 ## Features
 
