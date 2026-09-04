@@ -176,8 +176,6 @@ const fn state_of(ascii: AsciiState) -> ReadingState {
     reason = "tests may panic on unexpected input and compare exact decoded values"
 )]
 mod tests {
-    use std::string::ToString as _;
-
     use super::Measurement;
     use crate::protocol::ascii::AsciiReading;
     use crate::protocol::enums::{ReadingState, Unit};
