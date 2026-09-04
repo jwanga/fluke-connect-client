@@ -256,6 +256,10 @@ async fn info(device: &FlukeDevice<BtleplugTransport>) -> Result<()> {
             .await
             .map(|r| r.primary().to_string()),
     );
+    print_or_error(
+        "ascii display",
+        device.current_ascii_reading().await.map(|r| r.to_string()),
+    );
     println!("characteristics:");
     let mut uuids: Vec<u128> = device.transport().characteristic_uuids().collect();
     uuids.sort_unstable();
