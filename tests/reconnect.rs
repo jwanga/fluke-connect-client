@@ -506,3 +506,44 @@ async fn battery_source_yields_plain_levels() {
         &[uuids::BATTERY_LEVEL]
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_silent_link_is_dropped_at_the_idle_timeout() {
+    let first = MockTransport::new();
+    let second = MockTransport::new();
+    let connector = ScriptedConnector::new(
+        vec![Step::Found],
+        vec![Step::Session(first.clone()), Step::Session(second.clone())],
+    );
+    let mut policy = policy();
+    policy.idle_timeout = Some(Duration::from_secs(10));
+    let mut events = Reconnecting::new(connector.clone(), Readings, Some(()), policy);
+
+    assert!(matches!(next(&mut events).await, Event::Connected));
+    let connected = Instant::now();
+    // An item inside the window restarts the clock.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    first.notify(uuids::BINARY_READING, &hex(TEMPERATURE));
+    assert!(matches!(next(&mut events).await, Event::Item(Ok(_))));
+
+    assert!(matches!(next(&mut events).await, Event::Disconnected));
+    assert_eq!(connected.elapsed(), Duration::from_secs(16));
+    assert_eq!(first.disconnect_count(), 1, "a silent link is closed");
+    assert!(matches!(next(&mut events).await, Event::Connected));
+    assert_eq!(connector.calls(), rescan());
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_idle_watchdog_is_off_by_default() {
+    let transport = MockTransport::new();
+    let connector = ScriptedConnector::new(vec![], vec![Step::Session(transport.clone())]);
+    let mut events = Reconnecting::new(connector, Readings, Some(()), policy());
+
+    assert!(matches!(next(&mut events).await, Event::Connected));
+    let a_week = Duration::from_secs(7 * 24 * 3600);
+    assert!(
+        tokio::time::timeout(a_week, events.next()).await.is_err(),
+        "a silent link must stay up"
+    );
+    assert_eq!(transport.disconnect_count(), 0);
+}

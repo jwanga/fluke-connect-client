@@ -5,9 +5,10 @@
 //! the connection is lost: it re-scans in fixed windows (the device sets the
 //! pace by advertising), retries failed connections with exponential
 //! backoff, and never gives up unless [`ReconnectPolicy::max_attempts`]
-//! says so. [`Readings`], [`Measurements`], [`AsciiReadings`] and
-//! [`BatteryUpdates`] are sources for the corresponding [`FlukeDevice`]
-//! subscriptions.
+//! says so. An optional [`ReconnectPolicy::idle_timeout`] treats a link
+//! that stays up but goes silent as lost. [`Readings`], [`Measurements`],
+//! [`AsciiReadings`] and [`BatteryUpdates`] are sources for the
+//! corresponding [`FlukeDevice`] subscriptions.
 //!
 //! Every reconnection goes through a fresh scan on purpose. With btleplug on
 //! `CoreBluetooth`, a peripheral handle that has disconnected once is dead:
@@ -171,6 +172,14 @@ pub struct ReconnectPolicy {
     /// connects; reset by a successful connection) after which the stream
     /// yields [`Event::GaveUp`] and ends. `None` never gives up.
     pub max_attempts: Option<u32>,
+    /// Longest silence tolerated on a connected link. When no item arrives
+    /// within it the link is treated as lost: the device is disconnected,
+    /// [`Event::Disconnected`] follows and the stream reconnects through a
+    /// fresh scan. `None` (the default) waits forever, so a meter left in
+    /// HOLD or a slow logging interval is never kicked; set it when the
+    /// consumer would rather reconnect than trust a link that has gone
+    /// quiet, which `CoreBluetooth` is known to leave standing.
+    pub idle_timeout: Option<Duration>,
 }
 
 impl Default for ReconnectPolicy {
@@ -182,6 +191,7 @@ impl Default for ReconnectPolicy {
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(15),
             max_attempts: None,
+            idle_timeout: None,
         }
     }
 }
@@ -214,7 +224,8 @@ pub enum Event<I> {
     /// An item from the source. For the reading sources this is a decoded
     /// reading or a decode error; either way the connection is kept.
     Item(I),
-    /// The connection was lost; a new scan starts.
+    /// The connection was lost, or [`ReconnectPolicy::idle_timeout`] elapsed
+    /// and the link was dropped; a new scan starts.
     Disconnected,
     /// A scan window passed without seeing the device; scanning again.
     WaitingForDevice,
@@ -353,9 +364,35 @@ enum Exit {
     GaveUp,
 }
 
+/// What waiting for the next item of a session produced.
+enum Next<I> {
+    /// An item arrived.
+    Item(I),
+    /// The source's stream ended.
+    Ended,
+    /// Nothing arrived within [`ReconnectPolicy::idle_timeout`].
+    Idle,
+}
+
+/// Waits for the next item, giving up after `idle_timeout` of silence.
+async fn next_item<I>(
+    items: &mut BoxStream<'static, I>,
+    idle_timeout: Option<Duration>,
+) -> Next<I> {
+    let Some(limit) = idle_timeout else {
+        return items.next().await.map_or(Next::Ended, Next::Item);
+    };
+    match tokio::time::timeout(limit, items.next()).await {
+        Ok(Some(item)) => Next::Item(item),
+        Ok(None) => Next::Ended,
+        Err(_elapsed) => Next::Idle,
+    }
+}
+
 /// How a connected session ended.
 enum Outcome {
-    /// The source's stream ended: the link is gone.
+    /// The link is gone: the source's stream ended, or it went idle and
+    /// was closed.
     LinkLost,
     /// Opening the source failed after the link came up; the handle is dead.
     Failed(Error),
@@ -459,10 +496,18 @@ impl<C: Connector, S: Source<C::Transport>> Runner<C, S> {
         };
         self.attempts = 0;
         self.emit(Event::Connected).await?;
+        let idle_timeout = self.policy.idle_timeout;
         loop {
-            match unless_stopped(&mut self.stop, items.next()).await? {
-                Some(item) => self.emit(Event::Item(item)).await?,
-                None => return Ok(Outcome::LinkLost),
+            let next = next_item(&mut items, idle_timeout);
+            match unless_stopped(&mut self.stop, next).await? {
+                Next::Item(item) => self.emit(Event::Item(item)).await?,
+                Next::Ended => return Ok(Outcome::LinkLost),
+                Next::Idle => {
+                    // The link may well be up, but nothing is coming through
+                    // it; a fresh connection is the only cure.
+                    disconnect_quietly(device).await;
+                    return Ok(Outcome::LinkLost);
+                }
             }
         }
     }
@@ -558,5 +603,6 @@ mod tests {
         assert_eq!(policy.initial_backoff, Duration::from_secs(1));
         assert_eq!(policy.max_backoff, Duration::from_secs(15));
         assert_eq!(policy.max_attempts, None);
+        assert_eq!(policy.idle_timeout, None);
     }
 }
