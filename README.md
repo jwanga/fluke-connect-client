@@ -12,7 +12,8 @@ and, with the default `ble` feature, discovers devices, connects, and
 streams decoded readings as an async `Stream`: the binary reading record,
 and on meters that populate it, the ASCII display string. It also exposes the
 housekeeping characteristics: device information, battery level, locator
-LED, ID number, device name and clock.
+LED, ID number, device name and clock (the clock write is inert on the
+ir3000 FC).
 
 ## Hardware support
 

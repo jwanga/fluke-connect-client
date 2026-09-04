@@ -58,7 +58,7 @@ follows the Bluetooth SIG convention: `18xx` services, `29xx` characteristics.
 | 2903 | char | User string / device name (UTF-8, ≤ 98 B) | read, write | **[verified]** reads `IR 3000 FC` |
 | 2904 | char | Force drop | write | **[verified]** write accepted, no disconnect observed within 10 s (twice) |
 | 2905 | char | Locator LED (u8: 1 on, 0 off) | write | **[verified]** write accepted |
-| 290E | char | POSIX time (u64 LE per the guide) | write, notify | **[verified]** inert on the ir3000 FC: every write of 1 to 20 bytes is rejected with *Invalid Attribute Value Length*, reads are not permitted, and no notification was ever seen |
+| 290E | char | POSIX time (u64 LE per the guide) | write, notify | **[verified]** inert on the ir3000 FC: every write of 1 to 20 bytes is rejected with *Invalid Attribute Value Length*, reads are not permitted, and no notification was seen in 40 s of listening |
 | 2911 | char | Host firmware update control point | read, write, write-no-rsp, notify | present, **not used by this crate** |
 | 2912 | char | Host firmware update buffer | write, write-no-rsp | present, **not used by this crate** |
 | 1804 | service | TI OAD (radio firmware) | | present, **not used by this crate** |

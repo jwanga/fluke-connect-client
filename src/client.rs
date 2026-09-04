@@ -223,8 +223,8 @@ impl<T: Transport> FlukeDevice<T> {
     ///
     /// The value is written as the 8-byte little-endian integer described
     /// in Fluke's developer guide. The ir3000 FC rejects every write to this
-    /// characteristic (it has no clock of its own and does not forward the
-    /// value to the meter), so expect a transport error there.
+    /// characteristic with an attribute-length error, so expect a transport
+    /// error there; whether other family members accept it is unverified.
     ///
     /// # Errors
     ///
