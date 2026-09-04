@@ -23,6 +23,7 @@ use core::fmt;
 
 use super::ascii::{AsciiReading, AsciiState};
 use super::enums::{Magnitude, ReadingState, Unit};
+use super::notification::ReadingNotification;
 use super::reading::{Reading, to_base_unit};
 
 /// One measurement from a Fluke Connect device, whichever characteristic
@@ -157,6 +158,51 @@ impl fmt::Display for Measurement {
     }
 }
 
+/// One notification from whichever reading characteristic produced it.
+///
+/// The binary characteristic carries a primary and an optional secondary
+/// display; the ASCII characteristic carries the primary only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct MeasurementNotification {
+    /// The meter's primary display.
+    primary: Measurement,
+    /// The meter's secondary display, when the source carries one.
+    secondary: Option<Measurement>,
+}
+
+impl MeasurementNotification {
+    /// The primary display.
+    #[must_use]
+    pub const fn primary(&self) -> &Measurement {
+        &self.primary
+    }
+
+    /// The secondary display, if the meter is showing one.
+    #[must_use]
+    pub const fn secondary(&self) -> Option<&Measurement> {
+        self.secondary.as_ref()
+    }
+}
+
+impl From<ReadingNotification> for MeasurementNotification {
+    fn from(notification: ReadingNotification) -> Self {
+        Self {
+            primary: Measurement::Binary(*notification.primary()),
+            secondary: notification.secondary().copied().map(Measurement::Binary),
+        }
+    }
+}
+
+impl From<AsciiReading> for MeasurementNotification {
+    fn from(display: AsciiReading) -> Self {
+        Self {
+            primary: Measurement::Ascii(display),
+            secondary: None,
+        }
+    }
+}
+
 /// Maps an ASCII display classification onto the binary record's state
 /// vocabulary (see the module docs).
 const fn state_of(ascii: AsciiState) -> ReadingState {
@@ -176,9 +222,10 @@ const fn state_of(ascii: AsciiState) -> ReadingState {
     reason = "tests may panic on unexpected input and compare exact decoded values"
 )]
 mod tests {
-    use super::Measurement;
+    use super::{Measurement, MeasurementNotification};
     use crate::protocol::ascii::AsciiReading;
-    use crate::protocol::enums::{ReadingState, Unit};
+    use crate::protocol::enums::{Function, ReadingState, Unit};
+    use crate::protocol::notification::ReadingNotification;
     use crate::protocol::reading::Reading;
 
     /// Wraps a binary record given as hex.
@@ -218,5 +265,23 @@ mod tests {
         let inner = m.as_binary().unwrap();
         assert!(inner.is_empty());
         assert_eq!(inner.display_value(), Some(0.0));
+    }
+
+    #[test]
+    fn notification_conversions_keep_the_secondary_display() {
+        let dual = ReadingNotification::from_bytes(&crate::protocol::test_hex(
+            "00000002010700000000000202070000",
+        ))
+        .unwrap();
+        let n = MeasurementNotification::from(dual);
+        assert!(
+            matches!(n.primary(), Measurement::Binary(r) if r.function() == Function::VoltsAcLowZ)
+        );
+        assert!(matches!(n.secondary(), Some(Measurement::Binary(r)) if r.unit() == Unit::VoltsDc));
+
+        let a = AsciiReading::from_bytes(b"   9.2 V\x00  dc   ").unwrap();
+        let text_only = MeasurementNotification::from(a);
+        assert!(matches!(text_only.primary(), Measurement::Ascii(_)));
+        assert!(text_only.secondary().is_none());
     }
 }
