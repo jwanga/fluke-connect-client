@@ -3,7 +3,7 @@
 use futures_util::StreamExt as _;
 
 use crate::error::{Error, Result};
-use crate::protocol::{ProtocolError, ReadingNotification, uuids};
+use crate::protocol::{AsciiReading, ProtocolError, ReadingNotification, uuids};
 use crate::transport::{BoxStream, Transport, TransportError};
 
 /// Maximum length in bytes of the user-assignable device name.
@@ -32,7 +32,8 @@ pub struct DeviceInfo {
 /// A connected Fluke Connect device.
 ///
 /// Wraps any [`Transport`] and speaks the Fluke Connect GATT profile over
-/// it. Obtain one from the built-in backend with `backend::Adapter::connect`
+/// it: the binary reading stream, the ASCII display stream, and the
+/// housekeeping characteristics. Obtain one from the built-in backend with `backend::Adapter::connect`
 /// (feature `ble`), or construct it directly over your own transport with
 /// [`FlukeDevice::new`].
 #[derive(Debug)]
@@ -68,13 +69,9 @@ impl<T: Transport> FlukeDevice<T> {
     ///
     /// Returns an error if the subscription cannot be established.
     pub async fn readings(&self) -> Result<BoxStream<'static, Result<ReadingNotification>>> {
-        let notifications = self.transport.notifications().await?;
-        self.transport.subscribe(uuids::BINARY_READING).await?;
-        Ok(notifications
-            .filter_map(|n| async move {
-                (n.characteristic == uuids::BINARY_READING)
-                    .then(|| ReadingNotification::from_bytes(&n.value).map_err(Error::from))
-            })
+        let values = self.subscribed(uuids::BINARY_READING).await?;
+        Ok(values
+            .map(|value| ReadingNotification::from_bytes(&value).map_err(Error::from))
             .boxed())
     }
 
@@ -86,6 +83,38 @@ impl<T: Transport> FlukeDevice<T> {
     pub async fn current_reading(&self) -> Result<ReadingNotification> {
         let bytes = self.transport.read(uuids::BINARY_READING).await?;
         Ok(ReadingNotification::from_bytes(&bytes)?)
+    }
+
+    /// Subscribes to the ASCII display characteristic and returns a stream
+    /// of decoded display strings.
+    ///
+    /// The 376 FC and 902 FC clamps populate this characteristic and other
+    /// family members may; the ir3000 FC exposes it but never notifies, so
+    /// the stream stays silent there. Payloads that fail to decode are yielded as errors so a
+    /// consumer can log them without losing the stream, which ends when the
+    /// connection is lost.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription cannot be established.
+    pub async fn ascii_readings(&self) -> Result<BoxStream<'static, Result<AsciiReading>>> {
+        let values = self.subscribed(uuids::ASCII_READING).await?;
+        Ok(values
+            .map(|value| AsciiReading::from_bytes(&value).map_err(Error::from))
+            .boxed())
+    }
+
+    /// Reads the current ASCII display value without subscribing.
+    ///
+    /// On an ir3000 FC this fails with [`ProtocolError::UnsupportedFormat`]
+    /// because the adapter holds a placeholder value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read fails or the payload cannot be decoded.
+    pub async fn current_ascii_reading(&self) -> Result<AsciiReading> {
+        let bytes = self.transport.read(uuids::ASCII_READING).await?;
+        Ok(AsciiReading::from_bytes(&bytes)?)
     }
 
     /// Reads the *Device Information* service.

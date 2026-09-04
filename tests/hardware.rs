@@ -46,5 +46,9 @@ async fn streams_readings_from_a_real_device() {
         let reading = next.expect("decodes");
         eprintln!("{}", reading.primary());
     }
+    match device.current_ascii_reading().await {
+        Ok(display) => eprintln!("ascii display: {display}"),
+        Err(e) => eprintln!("ascii display unavailable: {e}"),
+    }
     device.disconnect().await.expect("disconnect");
 }

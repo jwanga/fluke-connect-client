@@ -12,9 +12,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use fluke_connect_client::backend::{Adapter, BtleplugTransport, DiscoveredDevice};
-use fluke_connect_client::protocol::uuids::BINARY_READING;
-use fluke_connect_client::transport::Transport as _;
-use fluke_connect_client::{FlukeDevice, Reading, ReadingNotification};
+use fluke_connect_client::protocol::uuids::{ASCII_READING, BINARY_READING};
+use fluke_connect_client::transport::{BoxStream, Transport as _};
+use fluke_connect_client::{AsciiReading, FlukeDevice, Reading, ReadingNotification};
 use futures_util::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 
@@ -59,11 +59,15 @@ enum Command {
 enum DeviceCommand {
     /// Show device information, battery, name, ID number and GATT table.
     Info,
-    /// Print live readings.
+    /// Print live readings (the binary record by default).
     Stream {
         /// Emit one JSON object per line instead of text.
         #[arg(long)]
         json: bool,
+        /// Stream the ASCII display string (376 FC, 902 FC and similar)
+        /// instead of the binary record. Silent on an ir3000 FC.
+        #[arg(long)]
+        ascii: bool,
         /// Stop after this many readings.
         #[arg(long)]
         count: Option<usize>,
@@ -71,7 +75,7 @@ enum DeviceCommand {
         #[arg(long)]
         seconds: Option<u64>,
     },
-    /// Write raw reading notifications to a JSON Lines file for bug reports.
+    /// Write raw reading and ASCII display notifications to a JSON Lines file for bug reports.
     Dump {
         /// Output path.
         output: PathBuf,
@@ -133,9 +137,10 @@ async fn run(device: &FlukeDevice<BtleplugTransport>, command: DeviceCommand) ->
         DeviceCommand::Info => info(device).await,
         DeviceCommand::Stream {
             json,
+            ascii,
             count,
             seconds,
-        } => stream(device, json, count, seconds).await,
+        } => stream(device, json, ascii, count, seconds).await,
         DeviceCommand::Dump { output, seconds } => dump(device, &output, seconds).await,
         DeviceCommand::Locator { state } => {
             let on = matches!(state, Switch::On);
@@ -251,6 +256,10 @@ async fn info(device: &FlukeDevice<BtleplugTransport>) -> Result<()> {
             .await
             .map(|r| r.primary().to_string()),
     );
+    print_or_error(
+        "ascii display",
+        device.current_ascii_reading().await.map(|r| r.to_string()),
+    );
     println!("characteristics:");
     let mut uuids: Vec<u128> = device.transport().characteristic_uuids().collect();
     uuids.sort_unstable();
@@ -268,14 +277,35 @@ fn print_or_error<E: std::fmt::Display>(label: &str, value: Result<String, E>) {
     }
 }
 
-/// Streams readings to stdout.
+/// Streams readings to stdout as pre-formatted lines.
 async fn stream(
     device: &FlukeDevice<BtleplugTransport>,
     json: bool,
+    ascii: bool,
     count: Option<usize>,
     seconds: Option<u64>,
 ) -> Result<()> {
-    let mut readings = device.readings().await?;
+    let mut lines: BoxStream<'static, fluke_connect_client::Result<String>> = if ascii {
+        device
+            .ascii_readings()
+            .await?
+            .map(move |r| {
+                r.map(|a| {
+                    if json {
+                        ascii_json_line(&a)
+                    } else {
+                        a.to_string()
+                    }
+                })
+            })
+            .boxed()
+    } else {
+        device
+            .readings()
+            .await?
+            .map(move |r| r.map(|n| if json { json_line(&n) } else { text_line(&n) }))
+            .boxed()
+    };
     let deadline = tokio::time::sleep(seconds.map_or(Duration::MAX, Duration::from_secs));
     tokio::pin!(deadline);
     let mut seen = 0_usize;
@@ -284,21 +314,13 @@ async fn stream(
         tokio::select! {
             () = &mut deadline => break,
             _ = tokio::signal::ctrl_c() => break,
-            next = readings.next() => {
+            next = lines.next() => {
                 let Some(next) = next else {
                     eprintln!("device disconnected");
                     break;
                 };
-                let mut out = stdout.lock();
                 match next {
-                    Ok(reading) if json => writeln!(out, "{}", json_line(&reading))?,
-                    Ok(reading) => {
-                        write!(out, "{}", reading.primary())?;
-                        if let Some(secondary) = reading.secondary() {
-                            write!(out, "    [{secondary}]")?;
-                        }
-                        writeln!(out)?;
-                    }
+                    Ok(line) => writeln!(stdout.lock(), "{line}")?,
                     Err(e) => eprintln!("bad reading: {e}"),
                 }
                 seen = seen.saturating_add(1);
@@ -311,12 +333,42 @@ async fn stream(
     Ok(())
 }
 
+/// Formats a binary notification as `primary    [secondary]`.
+fn text_line(reading: &ReadingNotification) -> String {
+    reading.secondary().map_or_else(
+        || reading.primary().to_string(),
+        |secondary| format!("{}    [{secondary}]", reading.primary()),
+    )
+}
+
+/// Serialises an ASCII display value as one JSON line.
+fn ascii_json_line(reading: &AsciiReading) -> String {
+    serde_json::json!({
+        "ascii": {
+            "display": reading.to_string(),
+            "reading_text": reading.reading_text(),
+            "value": reading.value(),
+            "display_value": reading.display_value(),
+            "state": reading.state(),
+            "unit": reading.unit(),
+            "unit_token": reading.unit_token(),
+            "magnitude": reading.magnitude(),
+            "acdc": reading.acdc(),
+            "hazardous_voltage": reading.hazardous_voltage(),
+            "inrush": reading.inrush(),
+            "raw": hex(reading.raw()),
+        },
+        "timestamp": timestamp(),
+    })
+    .to_string()
+}
+
 /// Serialises a notification as one JSON line.
 fn json_line(reading: &ReadingNotification) -> String {
     serde_json::json!({
         "primary": reading_json(reading.primary()),
         "secondary": reading.secondary().map(reading_json),
-        "timestamp": unix_now().map_or(0.0, |d| d.as_secs_f64()),
+        "timestamp": timestamp(),
     })
     .to_string()
 }
@@ -341,6 +393,11 @@ async fn dump(device: &FlukeDevice<BtleplugTransport>, output: &Path, seconds: u
     let transport = device.transport();
     let mut notifications = transport.notifications().await?;
     transport.subscribe(BINARY_READING).await?;
+    // Best effort: devices other than the ir3000 FC populate the ASCII
+    // display, and captures of it are what other-meter owners can send us.
+    if let Err(e) = transport.subscribe(ASCII_READING).await {
+        eprintln!("note: ASCII display not subscribed: {e}");
+    }
     if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
         tokio::fs::create_dir_all(parent)
             .await
@@ -363,7 +420,7 @@ async fn dump(device: &FlukeDevice<BtleplugTransport>, output: &Path, seconds: u
             next = notifications.next() => {
                 let Some(n) = next else { break };
                 let line = serde_json::json!({
-                    "t": unix_now().map_or(0.0, |d| d.as_secs_f64()),
+                    "t": timestamp(),
                     "characteristic": uuid::Uuid::from_u128(n.characteristic).to_string(),
                     "hex": hex(&n.value),
                 });
@@ -375,6 +432,11 @@ async fn dump(device: &FlukeDevice<BtleplugTransport>, output: &Path, seconds: u
     file.flush().await?;
     eprintln!("wrote {written} notifications");
     Ok(())
+}
+
+/// Seconds since the UNIX epoch as a float, `0.0` if the clock is unusable.
+fn timestamp() -> f64 {
+    unix_now().map_or(0.0, |d| d.as_secs_f64())
 }
 
 /// Time since the UNIX epoch.

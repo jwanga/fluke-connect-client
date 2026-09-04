@@ -1,0 +1,6 @@
+# Fluke Connect ASCII display characteristic (b6982901) values from public sources.
+# Tab-separated: <17-byte value as lower-case hex>  <expected Display output>  <meter, meaning, source>
+# Byte 0 is the format byte (0x00 = meter-style ASCII); bytes 1..17 are the 16 ASCII characters.
+00202020392e3220560020206463202020	9.2 V DC	Fluke 376 FC, 9.2 V DC. Hardware capture from https://github.com/zach-edf/fluke-app/blob/main/fixtures/dc-battery-validation.json
+00202020302e3720410020206463202020	0.7 A DC	Fluke 376 FC, 0.7 A DC. Service-explorer dump quoted at https://lambdafox.com/clamp-connect/
+00202020302e3075460020202020202020	0.0 µF	Fluke 902 FC, 0.0 uF. Reconstructed to the documented 17-byte layout from the decoder test at https://github.com/dwise03-bit/wise2-core (FlukeReadingDecoderTest.kt), whose literal is mis-padded

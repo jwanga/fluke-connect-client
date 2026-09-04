@@ -10,11 +10,51 @@
 mod common;
 
 use fluke_connect_client::{
-    Attribute, Decade, Function, Magnitude, Reading, ReadingNotification, ReadingState, Unit,
+    AsciiReading, AsciiState, Attribute, Decade, Function, Magnitude, Reading, ReadingNotification,
+    ReadingState, Unit,
 };
 
 /// Distinct notifications captured from an ir3000 FC attached to a Fluke 289.
 const IR3000FC_FLUKE289: &str = include_str!("fixtures/ir3000fc_fluke289_readings.txt");
+
+/// ASCII display values published by owners of other Fluke Connect meters.
+const ASCII_PUBLIC: &str = include_str!("fixtures/ascii_display_public.txt");
+
+/// The ASCII fixture file's data lines as `(hex, expected display)` pairs.
+fn ascii_records() -> impl Iterator<Item = (&'static str, &'static str)> {
+    ASCII_PUBLIC
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let mut fields = l.split('\t');
+            let hex = fields.next().unwrap_or_default();
+            let expected = fields.next().unwrap_or_default();
+            (hex, expected)
+        })
+}
+
+#[test]
+fn every_public_ascii_sample_decodes() {
+    let mut count = 0;
+    for (hex, expected) in ascii_records() {
+        let r =
+            AsciiReading::from_bytes(&common::hex(hex)).unwrap_or_else(|e| panic!("{hex}: {e}"));
+        assert_eq!(r.to_string(), expected, "{hex}");
+        assert_eq!(r.state(), AsciiState::Normal, "{hex}");
+        assert!(
+            !matches!(r.unit(), Unit::None | Unit::Unknown(_)),
+            "unit not recognised in {hex}"
+        );
+        assert!(!matches!(r.magnitude(), Magnitude::Unknown(_)), "{hex}");
+        assert!(r.value().is_some_and(f64::is_finite), "{hex}");
+        count += 1;
+    }
+    assert!(
+        count >= 3,
+        "expected at least three public samples, found {count}"
+    );
+}
 
 /// The fixture file's data lines.
 fn records() -> impl Iterator<Item = &'static str> {

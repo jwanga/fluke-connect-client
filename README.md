@@ -9,7 +9,8 @@ and adapters from Rust.
 
 Fluke Connect devices share one vendor GATT profile. This crate decodes it
 and, with the default `ble` feature, discovers devices, connects, and
-streams decoded readings as an async `Stream`. It also exposes the
+streams decoded readings as an async `Stream`: the binary reading record,
+and on meters that populate it, the ASCII display string. It also exposes the
 housekeeping characteristics: device information, battery level, locator
 LED, ID number, device name and clock.
 
@@ -84,6 +85,21 @@ assert_eq!(reading.to_string(), "546.0 mV DC");
 # Ok::<(), fluke_connect_client::ProtocolError>(())
 ```
 
+Clamp meters such as the 376 FC and 902 FC also publish the display as
+text on a second characteristic. `FlukeDevice::ascii_readings` streams it
+and `AsciiReading` decodes it with the same value and unit semantics:
+
+```rust
+use fluke_connect_client::{AsciiReading, AsciiState, Unit};
+
+let display = AsciiReading::from_bytes(b"\x00   9.2 V\x00  dc   ")?;
+assert_eq!(display.state(), AsciiState::Normal);
+assert_eq!(display.unit(), Unit::VoltsDc);
+assert_eq!(display.display_value(), Some(9.2));
+assert_eq!(display.to_string(), "9.2 V DC");
+# Ok::<(), fluke_connect_client::ProtocolError>(())
+```
+
 ## Command-line tool
 
 A diagnostic CLI ships behind the `cli` feature:
@@ -95,6 +111,7 @@ fluke-connect doctor              # adapter state and permission hints
 fluke-connect scan                # list Fluke Connect devices in range
 fluke-connect info                # device information, battery, name, ID
 fluke-connect stream              # live readings; --json for machine output
+fluke-connect stream --ascii      # the ASCII display string (376 FC, 902 FC and similar)
 fluke-connect dump readings.jsonl # raw notification capture for bug reports
 fluke-connect locator on          # blink the device LED
 ```

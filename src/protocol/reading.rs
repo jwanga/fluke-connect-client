@@ -229,11 +229,8 @@ impl Reading {
     /// Returns `None` when [`has_value`](Self::has_value) is false.
     #[must_use]
     pub fn value(&self) -> Option<f64> {
-        let exponent = self
-            .magnitude
-            .exponent()
-            .saturating_add(self.unit.base_exponent());
-        self.display_value().map(|v| scale(v, exponent))
+        self.display_value()
+            .map(|v| to_base_unit(v, self.magnitude, self.unit))
     }
 }
 
@@ -276,6 +273,15 @@ impl fmt::Display for UnitSuffix<'_> {
 const fn low_byte(value: u32) -> u8 {
     let [b0, _, _, _] = value.to_le_bytes();
     b0
+}
+
+/// Converts a displayed value to the unit's SI base by applying the SI
+/// prefix and the unit's own base exponent.
+pub(super) fn to_base_unit(display: f64, magnitude: Magnitude, unit: Unit) -> f64 {
+    scale(
+        display,
+        magnitude.exponent().saturating_add(unit.base_exponent()),
+    )
 }
 
 /// Multiplies `value` by `10^exp`, dividing for negative exponents so that
