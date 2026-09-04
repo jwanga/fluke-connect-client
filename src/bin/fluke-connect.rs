@@ -124,6 +124,14 @@ enum DeviceCommand {
         /// Re-scan and reconnect whenever the connection drops.
         #[arg(long)]
         reconnect: bool,
+        /// With --reconnect: drop and reconnect a link that delivers nothing
+        /// for this many seconds (default: never; a meter in HOLD is silent).
+        #[arg(long, requires = "reconnect", value_name = "SECONDS")]
+        idle_timeout: Option<u64>,
+        /// With --reconnect: give up after this many consecutive failed scans
+        /// or connects (default: never).
+        #[arg(long, requires = "reconnect", value_name = "N")]
+        max_attempts: Option<u32>,
         /// Stop after this many readings.
         #[arg(long)]
         count: Option<usize>,
@@ -184,11 +192,16 @@ async fn main() -> Result<()> {
         count,
         seconds,
         reconnect: true,
+        idle_timeout,
+        max_attempts,
     } = command
     {
         let (adapter, device) = discover(timeout, cli.device_name.as_deref()).await?;
         let pick = Pick::from_flags(binary, ascii);
-        return stream_reconnect(&adapter, &device, json, pick, count, seconds).await;
+        let mut policy = ReconnectPolicy::default();
+        policy.idle_timeout = idle_timeout.map(Duration::from_secs);
+        policy.max_attempts = max_attempts;
+        return stream_reconnect(&adapter, &device, json, pick, policy, count, seconds).await;
     }
 
     let device = connect(timeout, cli.device_name.as_deref()).await?;
@@ -212,6 +225,8 @@ async fn run(device: &FlukeDevice<BtleplugTransport>, command: DeviceCommand) ->
             count,
             seconds,
             reconnect: _,
+            idle_timeout: _,
+            max_attempts: _,
         } => {
             stream(
                 device,
@@ -320,11 +335,12 @@ async fn stream_reconnect(
     device: &DiscoveredDevice,
     json: bool,
     pick: Pick,
+    policy: ReconnectPolicy,
     count: Option<usize>,
     seconds: Option<u64>,
 ) -> Result<()> {
     eprintln!("connecting to {device} (will reconnect on loss)...");
-    let mut events = adapter.stream_with_reconnect(device, pick, ReconnectPolicy::default());
+    let mut events = adapter.stream_with_reconnect(device, pick, policy);
     let stop = events.stop_handle();
     let deadline = tokio::time::sleep(seconds.map_or(Duration::MAX, Duration::from_secs));
     tokio::pin!(deadline);
@@ -589,4 +605,45 @@ fn hex(bytes: &[u8]) -> String {
             s
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory as _, Parser as _};
+
+    use super::{Cli, DeviceCommand};
+
+    #[test]
+    fn command_line_is_well_formed() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn policy_flags_require_reconnect() {
+        assert!(Cli::try_parse_from(["fluke-connect", "stream", "--idle-timeout", "30"]).is_err());
+        assert!(Cli::try_parse_from(["fluke-connect", "stream", "--max-attempts", "3"]).is_err());
+    }
+
+    #[test]
+    fn policy_flags_parse_with_reconnect() {
+        let cli = Cli::try_parse_from([
+            "fluke-connect",
+            "stream",
+            "--reconnect",
+            "--idle-timeout",
+            "30",
+            "--max-attempts",
+            "3",
+        ]);
+        let stream = cli.ok().map(|cli| cli.command);
+        assert!(matches!(
+            stream,
+            Some(super::Command::Device(DeviceCommand::Stream {
+                reconnect: true,
+                idle_timeout: Some(30),
+                max_attempts: Some(3),
+                ..
+            }))
+        ));
+    }
 }
