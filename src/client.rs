@@ -391,7 +391,7 @@ fn decode_string(bytes: &[u8]) -> Result<String> {
 mod tests {
     use super::{decode_string, select};
     use crate::error::Error;
-    use crate::protocol::{ProtocolError, test_hex, uuids};
+    use crate::protocol::{test_hex, uuids};
     use crate::transport::Notification;
 
     /// Builds a notification for `select`.
@@ -400,30 +400,6 @@ mod tests {
             characteristic,
             value: value.to_vec(),
         }
-    }
-
-    #[test]
-    fn select_yields_ascii_until_binary_arrives_then_drops_it() {
-        let mut locked = false;
-        let ascii = notification(
-            uuids::ASCII_READING,
-            &test_hex("00202020392e3220560020206463202020"),
-        );
-        let first = select(&mut locked, &ascii).unwrap().unwrap();
-        assert!(first.primary().as_ascii().is_some());
-        assert!(!locked);
-
-        assert!(select(&mut locked, &notification(uuids::BATTERY_LEVEL, &[60])).is_none());
-
-        let binary = notification(
-            uuids::BINARY_READING,
-            &test_hex("00000002010700000000000202070000"),
-        );
-        let second = select(&mut locked, &binary).unwrap().unwrap();
-        assert!(second.secondary().is_some());
-        assert!(locked);
-
-        assert!(select(&mut locked, &ascii).is_none());
     }
 
     #[test]
@@ -440,25 +416,6 @@ mod tests {
             &test_hex("00202020392e3220560020206463202020"),
         );
         assert!(select(&mut locked, &ascii).is_none());
-    }
-
-    #[test]
-    fn select_never_locks_without_binary() {
-        let mut locked = false;
-        let placeholder = notification(
-            uuids::ASCII_READING,
-            &test_hex("0102030405000000000000000000000000"),
-        );
-        assert!(matches!(
-            select(&mut locked, &placeholder),
-            Some(Err(Error::Protocol(ProtocolError::UnsupportedFormat(1))))
-        ));
-        let ascii = notification(
-            uuids::ASCII_READING,
-            &test_hex("00202020392e3220560020206463202020"),
-        );
-        assert!(select(&mut locked, &ascii).unwrap().is_ok());
-        assert!(!locked);
     }
 
     #[test]

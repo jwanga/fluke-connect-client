@@ -14,6 +14,10 @@ mod common;
 use fluke_connect_client::protocol::uuids;
 use fluke_connect_client::transport::TransportError;
 use fluke_connect_client::{Error, FlukeDevice, Function, ProtocolError, ReadingState, Unit};
+use futures_util::StreamExt as _;
+
+use common::hex;
+use common::mock::MockTransport;
 
 /// Binary record with a populated secondary display (289 in V AC `LoZ`).
 const LOZ: &str = "00000002010700000000000202070000";
@@ -23,10 +27,6 @@ const TEMPERATURE: &str = "01030002082200000000000000000000";
 const ASCII_VOLTS: &str = "00202020392e3220560020206463202020";
 /// The ir3000 FC placeholder on the ASCII characteristic.
 const PLACEHOLDER: &str = "0102030405000000000000000000000000";
-use futures_util::StreamExt as _;
-
-use common::hex;
-use common::mock::MockTransport;
 
 #[tokio::test]
 async fn readings_stream_decodes_binary_notifications_only() {
@@ -39,14 +39,8 @@ async fn readings_stream_decodes_binary_notifications_only() {
     );
 
     mock.notify(uuids::BATTERY_LEVEL, &[60]);
-    mock.notify(
-        uuids::BINARY_READING,
-        &hex("01030002082200000000000000000000"),
-    );
-    mock.notify(
-        uuids::BINARY_READING,
-        &hex("00000002010700000000000202070000"),
-    );
+    mock.notify(uuids::BINARY_READING, &hex(TEMPERATURE));
+    mock.notify(uuids::BINARY_READING, &hex(LOZ));
     mock.notify(uuids::BINARY_READING, &[1, 2, 3]);
 
     let first = readings.next().await.unwrap().unwrap();
@@ -149,18 +143,9 @@ async fn ascii_readings_stream_decodes_ascii_notifications_only() {
         &[uuids::ASCII_READING]
     );
 
-    mock.notify(
-        uuids::BINARY_READING,
-        &hex("01030002082200000000000000000000"),
-    );
-    mock.notify(
-        uuids::ASCII_READING,
-        &hex("00202020392e3220560020206463202020"),
-    );
-    mock.notify(
-        uuids::ASCII_READING,
-        &hex("0102030405000000000000000000000000"),
-    );
+    mock.notify(uuids::BINARY_READING, &hex(TEMPERATURE));
+    mock.notify(uuids::ASCII_READING, &hex(ASCII_VOLTS));
+    mock.notify(uuids::ASCII_READING, &hex(PLACEHOLDER));
     mock.notify(uuids::ASCII_READING, &[1, 2, 3]);
 
     let first = readings.next().await.unwrap().unwrap();

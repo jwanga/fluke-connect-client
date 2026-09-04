@@ -15,9 +15,7 @@ use fluke_connect_client::backend::{Adapter, BtleplugTransport, DiscoveredDevice
 use fluke_connect_client::protocol::uuids::{ASCII_READING, BINARY_READING};
 use fluke_connect_client::reconnect::{Event, ReconnectPolicy};
 use fluke_connect_client::transport::{BoxStream, Transport as _};
-use fluke_connect_client::{
-    AsciiReading, FlukeDevice, Measurement, MeasurementNotification, Reading,
-};
+use fluke_connect_client::{FlukeDevice, Measurement, MeasurementNotification};
 use futures_util::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 
@@ -84,8 +82,10 @@ enum Command {
 enum DeviceCommand {
     /// Show device information, battery, name, ID number and GATT table.
     Info,
-    /// Print live readings. By default the binary record is used as soon as
-    /// the device sends it, with the ASCII display as the fallback until then.
+    /// Print live readings.
+    ///
+    /// By default the binary record is used as soon as the device sends it,
+    /// with the ASCII display as the fallback until then.
     Stream {
         /// Emit one JSON object per line instead of text.
         #[arg(long)]
@@ -462,62 +462,41 @@ fn json_line(m: &MeasurementNotification) -> String {
             Measurement::Binary(_) => "binary",
             Measurement::Ascii(_) => "ascii",
         },
-        "primary": measurement_detail_json(m.primary()),
-        "secondary": m.secondary().map(measurement_detail_json),
+        "primary": measurement_json(m.primary()),
+        "secondary": m.secondary().map(measurement_json),
         "timestamp": timestamp(),
     })
     .to_string()
 }
 
-/// Serialises one measurement with the fields specific to its source.
-fn measurement_detail_json(m: &Measurement) -> serde_json::Value {
-    match m {
-        Measurement::Binary(reading) => reading_json(reading),
-        Measurement::Ascii(display) => ascii_json(display),
-    }
-}
-
-/// The fields every measurement source can answer.
-fn measurement_json(measurement: &Measurement) -> serde_json::Value {
-    serde_json::json!({
-        "display": measurement.to_string(),
-        "value": measurement.value(),
-        "display_value": measurement.display_value(),
-        "unit": measurement.unit(),
-        "state": measurement.state(),
-        "magnitude": measurement.magnitude(),
-    })
-}
-
-/// Serialises one binary reading: the shared fields plus the binary-only ones.
-fn reading_json(reading: &Reading) -> serde_json::Value {
-    let mut json = measurement_json(&Measurement::from(*reading));
-    extend(
-        &mut json,
-        serde_json::json!({
+/// Serialises one measurement: the fields every source can answer plus the
+/// ones specific to where it came from.
+fn measurement_json(m: &Measurement) -> serde_json::Value {
+    let mut json = serde_json::json!({
+        "display": m.to_string(),
+        "value": m.value(),
+        "display_value": m.display_value(),
+        "unit": m.unit(),
+        "state": m.state(),
+        "magnitude": m.magnitude(),
+    });
+    let detail = match m {
+        Measurement::Binary(reading) => serde_json::json!({
             "function": reading.function(),
             "attribute": reading.attribute(),
             "raw": hex(reading.raw()),
         }),
-    );
-    json
-}
-
-/// Serialises one ASCII display value: the shared fields plus the text-only ones.
-fn ascii_json(reading: &AsciiReading) -> serde_json::Value {
-    let mut json = measurement_json(&Measurement::from(*reading));
-    extend(
-        &mut json,
-        serde_json::json!({
-            "ascii_state": reading.state(),
-            "reading_text": reading.reading_text(),
-            "unit_token": reading.unit_token(),
-            "acdc": reading.acdc(),
-            "hazardous_voltage": reading.hazardous_voltage(),
-            "inrush": reading.inrush(),
-            "raw": hex(reading.raw()),
+        Measurement::Ascii(display) => serde_json::json!({
+            "ascii_state": display.state(),
+            "reading_text": display.reading_text(),
+            "unit_token": display.unit_token(),
+            "acdc": display.acdc(),
+            "hazardous_voltage": display.hazardous_voltage(),
+            "inrush": display.inrush(),
+            "raw": hex(display.raw()),
         }),
-    );
+    };
+    extend(&mut json, detail);
     json
 }
 
