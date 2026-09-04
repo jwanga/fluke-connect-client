@@ -7,8 +7,7 @@
 //! backoff, and never gives up unless [`ReconnectPolicy::max_attempts`]
 //! says so. [`Readings`], [`Measurements`], [`AsciiReadings`] and
 //! [`BatteryUpdates`] are sources for the corresponding [`FlukeDevice`]
-//! subscriptions; [`ReconnectingReadings`] names the binary-record
-//! specialisation.
+//! subscriptions.
 //!
 //! Every reconnection goes through a fresh scan on purpose. With btleplug on
 //! `CoreBluetooth`, a peripheral handle that has disconnected once is dead:
@@ -19,7 +18,7 @@
 //! The engine is generic over [`Connector`] and [`Source`], so the policy
 //! can be tested without hardware; the built-in Bluetooth backend provides a
 //! connector through `backend::Adapter::stream_with_reconnect` and its
-//! `readings_with_reconnect` / `measurements_with_reconnect` shorthands.
+//! `measurements_with_reconnect` shorthand.
 
 use core::convert::Infallible;
 use core::future::Future;
@@ -94,7 +93,7 @@ pub trait Source<T: Transport>: Send + Sync + 'static {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Readings;
 
-impl<T: Transport + 'static> Source<T> for Readings {
+impl<T: Transport> Source<T> for Readings {
     type Item = Result<ReadingNotification>;
 
     async fn open(&self, device: &FlukeDevice<T>) -> Result<BoxStream<'static, Self::Item>> {
@@ -111,7 +110,7 @@ impl<T: Transport + 'static> Source<T> for Readings {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Measurements;
 
-impl<T: Transport + 'static> Source<T> for Measurements {
+impl<T: Transport> Source<T> for Measurements {
     type Item = Result<MeasurementNotification>;
 
     async fn open(&self, device: &FlukeDevice<T>) -> Result<BoxStream<'static, Self::Item>> {
@@ -123,7 +122,7 @@ impl<T: Transport + 'static> Source<T> for Measurements {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AsciiReadings;
 
-impl<T: Transport + 'static> Source<T> for AsciiReadings {
+impl<T: Transport> Source<T> for AsciiReadings {
     type Item = Result<AsciiReading>;
 
     async fn open(&self, device: &FlukeDevice<T>) -> Result<BoxStream<'static, Self::Item>> {
@@ -135,7 +134,7 @@ impl<T: Transport + 'static> Source<T> for AsciiReadings {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BatteryUpdates;
 
-impl<T: Transport + 'static> Source<T> for BatteryUpdates {
+impl<T: Transport> Source<T> for BatteryUpdates {
     type Item = u8;
 
     async fn open(&self, device: &FlukeDevice<T>) -> Result<BoxStream<'static, Self::Item>> {
@@ -206,11 +205,10 @@ impl ReconnectPolicy {
 
 /// One step in the life of a reconnecting stream.
 ///
-/// `I` is the [`Source`]'s item type; it defaults to that of [`Readings`]
-/// so [`ReconnectingReadings`] consumers can write `Event` unqualified.
+/// `I` is the [`Source`]'s item type.
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum Event<I = Result<ReadingNotification>> {
+pub enum Event<I> {
     /// Connected and subscribed; items follow.
     Connected,
     /// An item from the source. For the reading sources this is a decoded
@@ -277,10 +275,6 @@ pub struct Reconnecting<I> {
     /// Stop flag shared with the handles given out by `stop_handle`.
     stop: StopHandle,
 }
-
-/// [`Reconnecting`] over the binary reading record, as produced by
-/// [`Readings`] and `backend::Adapter::readings_with_reconnect`.
-pub type ReconnectingReadings = Reconnecting<Result<ReadingNotification>>;
 
 impl<I: Send + 'static> Reconnecting<I> {
     /// Starts supervising: connects, opens `source` and forwards its items,

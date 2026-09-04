@@ -20,11 +20,9 @@ use std::time::Duration;
 
 use common::hex;
 use common::mock::MockTransport;
-use fluke_connect_client::Function;
 use fluke_connect_client::protocol::uuids;
 use fluke_connect_client::reconnect::{
     BatteryUpdates, Connector, Event, Measurements, Readings, ReconnectPolicy, Reconnecting,
-    ReconnectingReadings,
 };
 use fluke_connect_client::transport::TransportError;
 use fluke_connect_client::{Error, FlukeDevice};
@@ -132,8 +130,6 @@ impl Connector for ScriptedConnector {
 const TEMPERATURE: &str = "01030002082200000000000000000000";
 /// ASCII 9.2 V DC from a 376 FC.
 const ASCII_VOLTS: &str = "00202020392e3220560020206463202020";
-/// Binary V AC `LoZ` record with a secondary display.
-const LOZ: &str = "00000002010700000000000202070000";
 
 fn policy() -> ReconnectPolicy {
     ReconnectPolicy::default()
@@ -146,12 +142,29 @@ async fn next<I>(events: &mut Reconnecting<I>) -> Event<I> {
         .expect("stream still open")
 }
 
+/// The calls of a connect followed by one rescan-and-reconnect: a handle
+/// that has disconnected is dead, so the next attempt must scan again.
+fn rescan() -> Vec<Call> {
+    vec![
+        Call::Connect(Duration::from_secs(30)),
+        Call::Find(Duration::from_secs(30)),
+        Call::Connect(Duration::from_secs(30)),
+    ]
+}
+
+/// Drops `link` and waits for the supervisor to report the loss and the
+/// following reconnection.
+async fn reconnect_after_dropping<I>(events: &mut Reconnecting<I>, link: &MockTransport) {
+    link.drop_link();
+    assert!(matches!(next(events).await, Event::Disconnected));
+    assert!(matches!(next(events).await, Event::Connected));
+}
+
 #[tokio::test(start_paused = true)]
 async fn connects_to_the_initial_target_without_scanning() {
     let transport = MockTransport::new();
     let connector = ScriptedConnector::new(vec![], vec![Step::Session(transport.clone())]);
-    let mut events: ReconnectingReadings =
-        Reconnecting::new(connector.clone(), Readings, Some(()), policy());
+    let mut events = Reconnecting::new(connector.clone(), Readings, Some(()), policy());
 
     assert!(matches!(next(&mut events).await, Event::Connected));
     assert_eq!(
@@ -190,19 +203,10 @@ async fn reconnects_by_rescanning_after_a_disconnect() {
     let mut events = Reconnecting::new(connector.clone(), Readings, Some(()), policy());
 
     assert!(matches!(next(&mut events).await, Event::Connected));
-    first.drop_link();
-    assert!(matches!(next(&mut events).await, Event::Disconnected));
-    assert!(matches!(next(&mut events).await, Event::Connected));
+    reconnect_after_dropping(&mut events, &first).await;
     second.notify(uuids::BINARY_READING, &hex(TEMPERATURE));
     assert!(matches!(next(&mut events).await, Event::Item(Ok(_))));
-    assert_eq!(
-        connector.calls(),
-        vec![
-            Call::Connect(Duration::from_secs(30)),
-            Call::Find(Duration::from_secs(30)),
-            Call::Connect(Duration::from_secs(30)),
-        ]
-    );
+    assert_eq!(connector.calls(), rescan());
 }
 
 #[tokio::test(start_paused = true)]
@@ -417,18 +421,11 @@ async fn subscribe_failure_is_retried_as_a_connect_failure() {
     assert!(matches!(next(&mut events).await, Event::Connected));
     assert_eq!(bad.disconnect_count(), 1);
     // A handle that failed after connecting is dead: the next attempt rescans.
-    assert_eq!(
-        connector.calls(),
-        vec![
-            Call::Connect(Duration::from_secs(30)),
-            Call::Find(Duration::from_secs(30)),
-            Call::Connect(Duration::from_secs(30)),
-        ]
-    );
+    assert_eq!(connector.calls(), rescan());
 }
 
 #[tokio::test(start_paused = true)]
-async fn measurements_source_locks_onto_binary() {
+async fn measurements_source_opens_both_characteristics_per_connection() {
     let first = MockTransport::new();
     let second = MockTransport::new();
     let connector = ScriptedConnector::new(
@@ -442,40 +439,20 @@ async fn measurements_source_locks_onto_binary() {
         first.subscriptions.lock().unwrap().as_slice(),
         &[uuids::BINARY_READING, uuids::ASCII_READING]
     );
+    // Which record wins is the client's business (see `client_mock`); here
+    // only the item type and the per-connection subscriptions matter.
     first.notify(uuids::ASCII_READING, &hex(ASCII_VOLTS));
     assert!(matches!(
         next(&mut events).await,
         Event::Item(Ok(m)) if m.primary().as_ascii().is_some()
     ));
-    first.notify(uuids::BINARY_READING, &hex(TEMPERATURE));
-    assert!(matches!(
-        next(&mut events).await,
-        Event::Item(Ok(m)) if m.primary().display_value() == Some(76.9)
-    ));
-    // Locked on: the ASCII notification is dropped, so the next item is the
-    // LoZ record, not 9.2 V.
-    first.notify(uuids::ASCII_READING, &hex(ASCII_VOLTS));
-    first.notify(uuids::BINARY_READING, &hex(LOZ));
-    assert!(matches!(
-        next(&mut events).await,
-        Event::Item(Ok(m)) if m.primary().as_binary().is_some_and(|r| r.function() == Function::VoltsAcLowZ)
-    ));
 
-    first.drop_link();
-    assert!(matches!(next(&mut events).await, Event::Disconnected));
-    assert!(matches!(next(&mut events).await, Event::Connected));
+    reconnect_after_dropping(&mut events, &first).await;
     assert_eq!(
         second.subscriptions.lock().unwrap().as_slice(),
         &[uuids::BINARY_READING, uuids::ASCII_READING]
     );
-    assert_eq!(
-        connector.calls(),
-        vec![
-            Call::Connect(Duration::from_secs(30)),
-            Call::Find(Duration::from_secs(30)),
-            Call::Connect(Duration::from_secs(30)),
-        ]
-    );
+    assert_eq!(connector.calls(), rescan());
 }
 
 #[tokio::test(start_paused = true)]
@@ -500,14 +477,7 @@ async fn measurements_source_without_characteristics_is_retried() {
     ));
     assert!(matches!(next(&mut events).await, Event::Connected));
     assert_eq!(bare.disconnect_count(), 1);
-    assert_eq!(
-        connector.calls(),
-        vec![
-            Call::Connect(Duration::from_secs(30)),
-            Call::Find(Duration::from_secs(30)),
-            Call::Connect(Duration::from_secs(30)),
-        ]
-    );
+    assert_eq!(connector.calls(), rescan());
 }
 
 #[tokio::test(start_paused = true)]
@@ -530,9 +500,7 @@ async fn battery_source_yields_plain_levels() {
     assert!(matches!(next(&mut events).await, Event::Item(60)));
     assert!(matches!(next(&mut events).await, Event::Item(59)));
 
-    first.drop_link();
-    assert!(matches!(next(&mut events).await, Event::Disconnected));
-    assert!(matches!(next(&mut events).await, Event::Connected));
+    reconnect_after_dropping(&mut events, &first).await;
     assert_eq!(
         second.subscriptions.lock().unwrap().as_slice(),
         &[uuids::BATTERY_LEVEL]

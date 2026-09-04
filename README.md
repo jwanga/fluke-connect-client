@@ -100,8 +100,8 @@ while let Some(event) = events.next().await {
 `events.stop_handle()` returns a cloneable handle whose `stop()` disconnects
 cleanly and ends the stream; the `fluke-connect stream --reconnect` command
 calls it on Ctrl-C. `Adapter::stream_with_reconnect` accepts any
-`reconnect::Source`: the built-in `Readings`, `AsciiReadings` and
-`BatteryUpdates` mirror the `FlukeDevice` streams, and the trait is small
+`reconnect::Source`: the built-in `Measurements`, `Readings`, `AsciiReadings`
+and `BatteryUpdates` mirror the `FlukeDevice` streams, and the trait is small
 enough to implement for your own subscription.
 
 Code that does not care which characteristic a value came from can wrap

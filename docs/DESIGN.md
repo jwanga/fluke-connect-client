@@ -97,15 +97,15 @@ starting over when the link drops. It is generic over two small traits:
 `Connector` (`find` for one scan window, `connect` for one attempt) supplies
 fresh connections, and `Source` (`open` on a connected `FlukeDevice`) says
 what to subscribe to. The stream is parameterised on the item type, not the
-source, so `ReconnectingReadings` is a plain alias, and the supervisor owns
-the source value so every connection gets a fresh subscription. `Readings`,
+source, and the supervisor owns the source value so every connection gets a
+fresh subscription. `Readings`,
 `Measurements`, `AsciiReadings` and `BatteryUpdates` are zero-sized sources
 delegating to the client; a source that fails to open (for example
 `Measurements` on a device with neither reading characteristic) is treated
 as a failed connect: disconnect, back off, re-scan. Both traits are testable
 with a scripted connector and an in-memory transport under paused Tokio
 time; `Adapter::stream_with_reconnect` supplies the real connector, with
-`readings_with_reconnect` and `measurements_with_reconnect` as shorthands.
+`measurements_with_reconnect` as the shorthand for the recommended source.
 
 Every reconnection goes through a fresh scan on purpose: after a
 disconnect, btleplug on CoreBluetooth keeps a stale peripheral whose
@@ -139,8 +139,9 @@ first-run failure.
 3. `tests/reconnect.rs` drives the supervisor with a scripted connector
    under paused Tokio time: backoff timings, per-scan connect budget,
    empty windows, give-up, stop and drop semantics, and per source that
-   `Measurements` locks onto the binary record and retries a device with
-   no reading characteristic, and that `BatteryUpdates` yields bare levels.
+   `Measurements` opens both characteristics on every connection and
+   retries a device that has neither, and that `BatteryUpdates` yields
+   bare levels.
 4. `tests/hardware.rs` is `#[ignore]` and additionally gated on
    `FLUKE_CONNECT_HW=1`; it connects to a real device and checks the first
    readings decode. A second test, gated on `FLUKE_CONNECT_HW_POWERCYCLE=1`,

@@ -21,9 +21,7 @@ use crate::client::FlukeDevice;
 use crate::error::{Error, Result};
 use crate::protocol::MeasurementNotification;
 use crate::protocol::uuids::READING_SERVICE;
-use crate::reconnect::{
-    Connector, Measurements, Readings, ReconnectPolicy, Reconnecting, ReconnectingReadings, Source,
-};
+use crate::reconnect::{Connector, Measurements, ReconnectPolicy, Reconnecting, Source};
 use crate::transport::{BoxStream, Notification, Transport, TransportError};
 
 /// How long [`Adapter::connect`] waits for the GATT connection.
@@ -201,20 +199,6 @@ impl Adapter {
             address: device.address.clone(),
         };
         Reconnecting::new(connector, source, Some(device.clone()), policy)
-    }
-
-    /// [`stream_with_reconnect`](Self::stream_with_reconnect) over the
-    /// binary reading record ([`Readings`]).
-    ///
-    /// # Panics
-    ///
-    /// Panics if called outside a Tokio runtime.
-    pub fn readings_with_reconnect(
-        &self,
-        device: &DiscoveredDevice,
-        policy: ReconnectPolicy,
-    ) -> ReconnectingReadings {
-        self.stream_with_reconnect(device, Readings, policy)
     }
 
     /// [`stream_with_reconnect`](Self::stream_with_reconnect) over the
