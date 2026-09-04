@@ -8,8 +8,9 @@
 //!
 //! # Layers
 //!
-//! - [`protocol`]: pure, I/O-free parsing of the binary reading record and
-//!   the UUID table. Usable with `default-features = false`.
+//! - [`protocol`]: pure, I/O-free parsing of the binary reading record, the
+//!   ASCII display string and the UUID table. Usable with
+//!   `default-features = false`.
 //! - `transport` (feature `std`): a small async trait over a connected GATT
 //!   peripheral so the client can be driven by any Bluetooth stack or by a
 //!   test double.
@@ -53,6 +54,6 @@ pub use client::{DeviceInfo, FlukeDevice};
 pub use error::{Error, Result};
 
 pub use protocol::{
-    Attribute, Decade, Function, Magnitude, ProtocolError, Reading, ReadingNotification,
-    ReadingState, Unit,
+    AsciiReading, AsciiState, Attribute, Decade, Function, Magnitude, ProtocolError, Reading,
+    ReadingNotification, ReadingState, Unit,
 };

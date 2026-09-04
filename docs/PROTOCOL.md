@@ -51,7 +51,7 @@ follows the Bluetooth SIG convention: `18xx` services, `29xx` characteristics.
 | Slot | Kind | Name | Properties | Status |
 |------|------|------|------------|--------|
 | 1800 | service | Reading | | **[verified]** |
-| 2901 | char | ASCII display string (16 B) | read, notify | present but not populated on ir3000 FC **[verified]**; populated on 376 FC / 902 FC **[documented]** |
+| 2901 | char | ASCII display (17 B: format byte + 16 ASCII) | read, notify | placeholder with format byte 1 on ir3000 FC **[verified]**; populated on 376 FC / 902 FC **[documented, public captures]** |
 | 290F | char | Binary reading (8 or 16 B) | read, notify | **[verified]** |
 | 1801 | service | Connection | | **[verified]** |
 | 2902 | char | ID number (u8) | read, write | **[verified]** reads 0 |
@@ -184,14 +184,43 @@ with the leads shorted; 0 otherwise. The rest are **[documented]**.
 9 low ohms, 10 open glitch, 11 short glitch, 12 peak, 13 sourced,
 14 simulated, 15 noise, 16 breakdown.
 
-## ASCII display string **[documented]**
+## ASCII display string **[documented, public captures]**
 
-Sixteen ASCII bytes: `reading[6] multiplier[1] unit[4] acdc[2] bolt[1] inrush[2]`.
-The reading is right-justified; the multiplier is one of `n u m k M` or a
-space; the unit is left-justified (`V`, `A`, `OHMS`, `DEGC`, ...); `acdc` is
-`ac` or `dc`; `bolt` is `*` when the hazardous-voltage symbol is lit;
-`inrush` is `in` or spaces. The ir3000 FC leaves this characteristic at a
-placeholder pattern (`01 02 03 04 05 00 ...`) and never notifies it.
+The characteristic value is **17 bytes**: a format byte followed by 16 ASCII
+characters. Format `0x00` is the "meter style" layout below; the developer
+guide marks `1` as unassigned. Three public captures (two from a 376 FC, one
+from a 902 FC) all carry format `0x00`.
+
+| Offset | Len | Field      | Contents |
+|--------|-----|------------|----------|
+| 0      | 6   | reading    | right-justified, space padded: digits, `.`, `-`, or `OL` |
+| 6      | 1   | multiplier | `n`, `u`, `m`, `k`, `M`, or a space |
+| 7      | 4   | unit       | left-justified, NUL-terminated when shorter than 4: `V`, `A`, `OHMS`, `DEGC`, `DEGF`, `H`, `VHZ`, `F`, `R` |
+| 11     | 2   | acdc       | `ac`, `dc`, or spaces |
+| 13     | 1   | bolt       | `*` while the hazardous-voltage symbol is lit |
+| 14     | 2   | inrush     | `in` while inrush capture is active, else spaces |
+
+Offsets are within the 16-byte text, after the format byte. The guide's `H`
+token is hertz (the 3000 FC has no inductance function) and `R` is degrees
+Rankine. Expect tokens outside this list on newer firmware; the crate keeps
+the raw token when it cannot map one.
+
+Public samples (hex of the full 17-byte value):
+
+| Bytes | Text | Meaning | Source |
+|-------|------|---------|--------|
+| `00 20 20 20 39 2e 32 20 56 00 20 20 64 63 20 20 20` | `"   9.2 V\0  dc   "` | **9.2 V DC**, Fluke 376 FC | hardware capture in `zach-edf/fluke-app` |
+| `00 20 20 20 30 2e 37 20 41 00 20 20 64 63 20 20 20` | `"   0.7 A\0  dc   "` | **0.7 A DC**, Fluke 376 FC | lambdafox.com/clamp-connect |
+| `00 20 20 20 30 2e 30 75 46 00 20 20 20 20 20 20 20` | `"   0.0uF\0       "` | **0.0 µF**, Fluke 902 FC | `dwise03-bit/wise2-core` decoder test, re-padded to the documented layout |
+
+Not yet observed on the wire: negative values, `OL`, blank or dashed
+displays, `ac`, the bolt and the inrush marker. The crate handles them per
+the guide and will need confirming captures.
+
+The ir3000 FC leaves this characteristic at the placeholder
+`01 02 03 04 05 00 …` (format byte `1`) and never notifies it **[verified]**.
+Its host meter, the 289, is a 50 000-count instrument whose readings need
+seven characters, which do not fit the six-character reading field.
 
 ## What the adapter talks to
 

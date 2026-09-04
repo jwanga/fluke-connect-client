@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 
 use fluke_connect_client::protocol::uuids;
 use fluke_connect_client::transport::{BoxStream, Notification, Transport, TransportError};
-use fluke_connect_client::{Error, FlukeDevice, Function, ReadingState, Unit};
+use fluke_connect_client::{
+    Error, FlukeDevice, Function, Magnitude, ProtocolError, ReadingState, Unit,
+};
 use futures_util::StreamExt as _;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -218,4 +220,77 @@ async fn current_reading_reads_the_characteristic() {
     let reading = device.current_reading().await.unwrap();
     assert_eq!(reading.primary().state(), ReadingState::OverRange);
     assert_eq!(reading.primary().function(), Function::Capacitance);
+}
+
+#[tokio::test]
+async fn ascii_readings_stream_decodes_ascii_notifications_only() {
+    let mock = MockTransport::new();
+    let device = FlukeDevice::new(mock.clone());
+    let mut readings = device.ascii_readings().await.unwrap();
+    assert_eq!(
+        mock.subscriptions.lock().unwrap().as_slice(),
+        &[uuids::ASCII_READING]
+    );
+
+    mock.notify(
+        uuids::BINARY_READING,
+        &hex("01030002082200000000000000000000"),
+    );
+    mock.notify(
+        uuids::ASCII_READING,
+        &hex("00202020392e3220560020206463202020"),
+    );
+    mock.notify(
+        uuids::ASCII_READING,
+        &hex("0102030405000000000000000000000000"),
+    );
+    mock.notify(uuids::ASCII_READING, &[1, 2, 3]);
+
+    let first = readings.next().await.unwrap().unwrap();
+    assert_eq!(first.unit(), Unit::VoltsDc);
+    assert_eq!(first.display_value(), Some(9.2));
+
+    let placeholder = readings.next().await.unwrap();
+    assert!(matches!(
+        placeholder,
+        Err(Error::Protocol(ProtocolError::UnsupportedFormat(1)))
+    ));
+
+    let short = readings.next().await.unwrap();
+    assert!(matches!(
+        short,
+        Err(Error::Protocol(ProtocolError::InvalidLength { .. }))
+    ));
+}
+
+#[tokio::test]
+async fn current_ascii_reading_reads_the_characteristic() {
+    let mock = MockTransport::new().with_value(uuids::ASCII_READING, b"\x00   0.0uF\x00       ");
+    let device = FlukeDevice::new(mock);
+    let reading = device.current_ascii_reading().await.unwrap();
+    assert_eq!(reading.unit(), Unit::Farads);
+    assert_eq!(reading.magnitude(), Magnitude::Micro);
+    assert_eq!(reading.to_string(), "0.0 µF");
+}
+
+#[tokio::test]
+async fn current_ascii_reading_rejects_the_ir3000_placeholder() {
+    let mock = MockTransport::new().with_value(
+        uuids::ASCII_READING,
+        &hex("0102030405000000000000000000000000"),
+    );
+    let device = FlukeDevice::new(mock);
+    assert!(matches!(
+        device.current_ascii_reading().await,
+        Err(Error::Protocol(ProtocolError::UnsupportedFormat(1)))
+    ));
+}
+
+#[tokio::test]
+async fn current_ascii_reading_reports_a_missing_characteristic() {
+    let device = FlukeDevice::new(MockTransport::new());
+    assert!(matches!(
+        device.current_ascii_reading().await,
+        Err(Error::Transport(TransportError::CharacteristicNotFound(_)))
+    ));
 }

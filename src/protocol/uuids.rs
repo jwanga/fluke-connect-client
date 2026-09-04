@@ -29,7 +29,10 @@ pub const fn sig_uuid(short: u16) -> u128 {
 /// *Reading* service. Advertised by every Fluke Connect device; use it as
 /// the scan filter.
 pub const READING_SERVICE: u128 = fluke_uuid(0x1800);
-/// 16-byte ASCII display string (read, notify). Not populated by the ir3000 FC.
+/// ASCII display string, see [`AsciiReading`](super::AsciiReading) (read, notify).
+///
+/// 17 bytes on the wire: a format byte followed by 16 ASCII characters.
+/// The ir3000 FC leaves it at a placeholder and never notifies it.
 pub const ASCII_READING: u128 = fluke_uuid(0x2901);
 /// Binary reading record, see [`ReadingNotification`](super::ReadingNotification) (read, notify).
 pub const BINARY_READING: u128 = fluke_uuid(0x290F);

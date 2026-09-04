@@ -26,7 +26,7 @@
 │ client::FlukeDevice<T: Transport>     (feature "std")       │
 │ transport::Transport trait                                  │
 ├─────────────────────────────────────────────────────────────┤
-│ protocol::{Reading, ReadingNotification, enums, uuids}      │
+│ protocol::{Reading, ReadingNotification, AsciiReading, ...}  │
 │ (core only, no_std)                                         │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -38,7 +38,10 @@ bit pattern decodes, with unrecognised codes kept in `Unknown(u8)` variants
 so newer devices degrade gracefully. `ReadingNotification` accepts the
 8-byte single-display form and the 16-byte primary + secondary form. The
 UUID table is expressed as `u128` constants so the module has no
-dependencies.
+dependencies. `AsciiReading` parses the text display characteristic used by
+the clamp meters; `from_array` is total over ASCII input, and the 17-byte
+framed form is gated on its format byte so unknown layouts fail loudly
+instead of decoding garbage.
 
 ### transport
 
@@ -53,7 +56,9 @@ must end when the connection is lost.
 `FlukeDevice<T>` maps the GATT profile onto typed methods. `readings()`
 subscribes to the binary reading characteristic and yields
 `Result<ReadingNotification>` so decode failures are reported without
-tearing down the stream. Housekeeping methods (`device_info`,
+tearing down the stream; `ascii_readings()` does the same for the ASCII
+display characteristic. Both go through one private subscribe-then-filter
+helper. Housekeeping methods (`device_info`,
 `battery_level`, `set_locator`, `set_name`, `set_id_number`, `set_time`,
 `force_drop`) are thin, documented wrappers.
 
