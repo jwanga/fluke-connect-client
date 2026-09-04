@@ -49,7 +49,10 @@ delegate, so parity is structural rather than re-implemented; its only own
 semantics are folding `AsciiState` onto `ReadingState` (dashes to blank,
 other text to invalid) and reporting an all-zero binary record as empty.
 Source-specific detail stays reachable through `as_binary` and `as_ascii`.
-It is the item type the auto-selecting stream will yield.
+`MeasurementNotification` pairs a primary and optional secondary
+`Measurement` (an ASCII source never has one), is built from either
+notification type with `From`, and is the item type of the auto-selecting
+stream.
 
 ### transport
 
@@ -61,12 +64,17 @@ must end when the connection is lost.
 
 ### client
 
-`FlukeDevice<T>` maps the GATT profile onto typed methods. `readings()`
-subscribes to the binary reading characteristic and yields
-`Result<ReadingNotification>` so decode failures are reported without
-tearing down the stream; `ascii_readings()` does the same for the ASCII
-display characteristic. Both go through one private subscribe-then-filter
-helper. Housekeeping methods (`device_info`,
+`FlukeDevice<T>` maps the GATT profile onto typed methods. `measurements()`
+opens the notification stream, subscribes to the binary and then the ASCII
+reading characteristic tolerating only "characteristic not found" (both
+missing is `NoReadingCharacteristic`), and yields
+`Result<MeasurementNotification>`. Its selection policy is a pure function
+driven by `filter_map`: the stream locks onto the binary record when its
+first notification arrives, decodable or not, and drops ASCII afterwards.
+`readings()` and `ascii_readings()` pin one source, yield
+`Result<ReadingNotification>` and `Result<AsciiReading>`, and share one
+private subscribe-then-filter helper; decode failures are reported as items
+without tearing down any of these streams. Housekeeping methods (`device_info`,
 `battery_level`, `set_locator`, `set_name`, `set_id_number`, `set_time`,
 `force_drop`) are thin, documented wrappers.
 
@@ -115,7 +123,9 @@ first-run failure.
 
 1. Protocol unit tests with byte fixtures from real captures and from
    published pc3000 FC logs, plus round-trip tests over every enum code.
-2. `tests/client_mock.rs` drives the client through an in-memory transport.
+2. `tests/client_mock.rs` drives the client through an in-memory transport,
+   including the four `measurements()` cases: binary only, ASCII only, both
+   (binary wins after its first notification), and neither (error).
 3. `tests/reconnect.rs` drives the supervisor with a scripted connector
    under paused Tokio time: backoff timings, per-scan connect budget,
    empty windows, give-up, stop and drop semantics.

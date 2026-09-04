@@ -15,7 +15,9 @@ use fluke_connect_client::backend::{Adapter, BtleplugTransport, DiscoveredDevice
 use fluke_connect_client::protocol::uuids::{ASCII_READING, BINARY_READING};
 use fluke_connect_client::reconnect::{Event, ReconnectPolicy};
 use fluke_connect_client::transport::{BoxStream, Transport as _};
-use fluke_connect_client::{AsciiReading, FlukeDevice, Measurement, Reading, ReadingNotification};
+use fluke_connect_client::{
+    AsciiReading, FlukeDevice, Measurement, MeasurementNotification, Reading,
+};
 use futures_util::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 
@@ -43,6 +45,28 @@ enum Switch {
     Off,
 }
 
+/// Which reading characteristic `stream` decodes.
+#[derive(Debug, Clone, Copy)]
+enum Source {
+    /// Whatever the device exposes, locking onto the binary record once it notifies.
+    Auto,
+    /// The binary reading record only.
+    Binary,
+    /// The ASCII display string only.
+    Ascii,
+}
+
+impl Source {
+    /// Resolves the `--binary` / `--ascii` flags; clap rejects both together.
+    const fn from_flags(binary: bool, ascii: bool) -> Self {
+        match (binary, ascii) {
+            (true, _) => Self::Binary,
+            (false, true) => Self::Ascii,
+            (false, false) => Self::Auto,
+        }
+    }
+}
+
 /// Subcommands.
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -60,16 +84,20 @@ enum Command {
 enum DeviceCommand {
     /// Show device information, battery, name, ID number and GATT table.
     Info,
-    /// Print live readings (the binary record by default).
+    /// Print live readings. By default the binary record is used as soon as
+    /// the device sends it, with the ASCII display as the fallback until then.
     Stream {
         /// Emit one JSON object per line instead of text.
         #[arg(long)]
         json: bool,
-        /// Stream the ASCII display string (376 FC, 902 FC and similar)
-        /// instead of the binary record. Silent on an ir3000 FC.
-        #[arg(long)]
+        /// Stream only the binary reading record; fails if the device lacks it.
+        #[arg(long, conflicts_with = "ascii")]
+        binary: bool,
+        /// Stream only the ASCII display string (376 FC, 902 FC and similar);
+        /// fails if the device lacks it. Silent on an ir3000 FC.
+        #[arg(long, conflicts_with = "binary")]
         ascii: bool,
-        /// Re-scan and reconnect whenever the connection drops.
+        /// Re-scan and reconnect whenever the connection drops (binary record only).
         #[arg(long, conflicts_with = "ascii")]
         reconnect: bool,
         /// Stop after this many readings.
@@ -153,11 +181,21 @@ async fn run(device: &FlukeDevice<BtleplugTransport>, command: DeviceCommand) ->
         DeviceCommand::Info => info(device).await,
         DeviceCommand::Stream {
             json,
+            binary,
             ascii,
             count,
             seconds,
             reconnect: _,
-        } => stream(device, json, ascii, count, seconds).await,
+        } => {
+            stream(
+                device,
+                json,
+                Source::from_flags(binary, ascii),
+                count,
+                seconds,
+            )
+            .await
+        }
         DeviceCommand::Dump { output, seconds } => dump(device, &output, seconds).await,
         DeviceCommand::Locator { state } => {
             let on = matches!(state, Switch::On);
@@ -280,7 +318,8 @@ async fn stream_reconnect(
                     // Readings buffered before a stop are drained but not printed,
                     // so --count never overshoots.
                     Event::Reading(reading) if !stop.is_stopped() => {
-                        let line = if json { json_line(&reading) } else { text_line(&reading) };
+                        let measurement = MeasurementNotification::from(reading);
+                        let line = if json { json_line(&measurement) } else { text_line(&measurement) };
                         writeln!(stdout.lock(), "{line}")?;
                         seen = seen.saturating_add(1);
                         if count.is_some_and(|max| seen >= max) {
@@ -361,31 +400,26 @@ fn print_or_error<E: std::fmt::Display>(label: &str, value: Result<String, E>) {
 async fn stream(
     device: &FlukeDevice<BtleplugTransport>,
     json: bool,
-    ascii: bool,
+    source: Source,
     count: Option<usize>,
     seconds: Option<u64>,
 ) -> Result<()> {
-    let mut lines: BoxStream<'static, fluke_connect_client::Result<String>> = if ascii {
-        device
-            .ascii_readings()
-            .await?
-            .map(move |r| {
-                r.map(|a| {
-                    if json {
-                        ascii_json_line(&a)
-                    } else {
-                        a.to_string()
-                    }
-                })
-            })
-            .boxed()
-    } else {
-        device
-            .readings()
-            .await?
-            .map(move |r| r.map(|n| if json { json_line(&n) } else { text_line(&n) }))
-            .boxed()
-    };
+    let measurements: BoxStream<'static, fluke_connect_client::Result<MeasurementNotification>> =
+        match source {
+            Source::Auto => device.measurements().await?,
+            Source::Binary => device
+                .readings()
+                .await?
+                .map(|r| r.map(MeasurementNotification::from))
+                .boxed(),
+            Source::Ascii => device
+                .ascii_readings()
+                .await?
+                .map(|r| r.map(MeasurementNotification::from))
+                .boxed(),
+        };
+    let mut lines =
+        measurements.map(move |r| r.map(|m| if json { json_line(&m) } else { text_line(&m) }));
     let deadline = tokio::time::sleep(seconds.map_or(Duration::MAX, Duration::from_secs));
     tokio::pin!(deadline);
     let mut seen = 0_usize;
@@ -413,31 +447,34 @@ async fn stream(
     Ok(())
 }
 
-/// Formats a binary notification as `primary    [secondary]`.
-fn text_line(reading: &ReadingNotification) -> String {
-    reading.secondary().map_or_else(
-        || reading.primary().to_string(),
-        |secondary| format!("{}    [{secondary}]", reading.primary()),
+/// Formats a notification as `primary    [secondary]`.
+fn text_line(m: &MeasurementNotification) -> String {
+    m.secondary().map_or_else(
+        || m.primary().to_string(),
+        |secondary| format!("{}    [{secondary}]", m.primary()),
     )
 }
 
-/// Serialises an ASCII display value as one JSON line.
-fn ascii_json_line(reading: &AsciiReading) -> String {
+/// Serialises a notification as one JSON line.
+fn json_line(m: &MeasurementNotification) -> String {
     serde_json::json!({
-        "ascii": ascii_json(reading),
+        "source": match m.primary() {
+            Measurement::Binary(_) => "binary",
+            Measurement::Ascii(_) => "ascii",
+        },
+        "primary": measurement_detail_json(m.primary()),
+        "secondary": m.secondary().map(measurement_detail_json),
         "timestamp": timestamp(),
     })
     .to_string()
 }
 
-/// Serialises a notification as one JSON line.
-fn json_line(reading: &ReadingNotification) -> String {
-    serde_json::json!({
-        "primary": reading_json(reading.primary()),
-        "secondary": reading.secondary().map(reading_json),
-        "timestamp": timestamp(),
-    })
-    .to_string()
+/// Serialises one measurement with the fields specific to its source.
+fn measurement_detail_json(m: &Measurement) -> serde_json::Value {
+    match m {
+        Measurement::Binary(reading) => reading_json(reading),
+        Measurement::Ascii(display) => ascii_json(display),
+    }
 }
 
 /// The fields every measurement source can answer.
