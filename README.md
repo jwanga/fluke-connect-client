@@ -83,7 +83,6 @@ use futures_util::StreamExt as _;
 let adapter = Adapter::open().await?;
 let device = adapter.find_first(Duration::from_secs(60)).await?;
 let mut events = adapter.readings_with_reconnect(&device, ReconnectPolicy::default());
-let stop = events.stop_handle();
 while let Some(event) = events.next().await {
     match event {
         Event::Reading(reading) => println!("{}", reading.primary()),
@@ -91,8 +90,12 @@ while let Some(event) = events.next().await {
         other => eprintln!("{other:?}"),
     }
 }
-# let _ = stop; Ok(()) }
+# Ok(()) }
 ```
+
+`events.stop_handle()` returns a cloneable handle whose `stop()` disconnects
+cleanly and ends the stream; the `fluke-connect stream --reconnect` command
+calls it on Ctrl-C.
 
 Each reading carries the display state (normal, blank, `OL`, open
 thermocouple, ...), the unit, the meter function, the SI prefix and the

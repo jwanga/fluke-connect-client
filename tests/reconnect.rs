@@ -396,10 +396,10 @@ async fn subscribe_failure_is_retried_as_a_connect_failure() {
     let bad = MockTransport::new().failing_subscribe();
     let good = MockTransport::new();
     let connector = ScriptedConnector::new(
-        vec![],
+        vec![Step::Found],
         vec![Step::Session(bad.clone()), Step::Session(good)],
     );
-    let mut events = ReconnectingReadings::new(connector, Some(()), policy());
+    let mut events = ReconnectingReadings::new(connector.clone(), Some(()), policy());
 
     assert!(matches!(
         next(&mut events).await,
@@ -407,4 +407,13 @@ async fn subscribe_failure_is_retried_as_a_connect_failure() {
     ));
     assert!(matches!(next(&mut events).await, Event::Connected));
     assert_eq!(bad.disconnect_count(), 1);
+    // A handle that failed after connecting is dead: the next attempt rescans.
+    assert_eq!(
+        connector.calls(),
+        vec![
+            Call::Connect(Duration::from_secs(30)),
+            Call::Find(Duration::from_secs(30)),
+            Call::Connect(Duration::from_secs(30)),
+        ]
+    );
 }

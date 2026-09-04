@@ -86,9 +86,9 @@ Every reconnection goes through a fresh scan on purpose: after a
 disconnect, btleplug on CoreBluetooth keeps a stale peripheral whose
 notification stream is silent forever, so the connector forgets cached
 peripherals and re-finds the device by address. Scan windows repeat at a
-fixed length because the device sets the pace by advertising; only connect
-failures back off (1 s doubling to 15 s with full jitter, then back to
-scanning). The adapter's event broadcast is shallow, so it is subscribed
+fixed length because the device sets the pace by advertising; empty
+windows repeat immediately, while scan errors and connect failures back
+off (1 s doubling to 15 s with full jitter, then back to scanning). The adapter's event broadcast is shallow, so it is subscribed
 per attempt and polled continuously.
 
 Events flow through a bounded channel; `StopHandle::stop` disconnects the

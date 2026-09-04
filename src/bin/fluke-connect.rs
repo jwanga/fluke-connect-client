@@ -277,7 +277,9 @@ async fn stream_reconnect(
                 )]
                 match event {
                     Event::Connected => eprintln!("connected"),
-                    Event::Reading(reading) => {
+                    // Readings buffered before a stop are drained but not printed,
+                    // so --count never overshoots.
+                    Event::Reading(reading) if !stop.is_stopped() => {
                         let line = if json { json_line(&reading) } else { text_line(&reading) };
                         writeln!(stdout.lock(), "{line}")?;
                         seen = seen.saturating_add(1);
@@ -285,6 +287,7 @@ async fn stream_reconnect(
                             stop.stop();
                         }
                     }
+                    Event::Reading(_) => {}
                     Event::BadReading(e) => eprintln!("bad reading: {e}"),
                     Event::Disconnected => eprintln!("disconnected; scanning again..."),
                     Event::WaitingForDevice => {

@@ -226,14 +226,26 @@ impl Adapter {
         let peripheral = self.inner.peripheral(&device.id).await.map_err(map_err)?;
         #[cfg(feature = "tracing")]
         tracing::debug!(device = %device, "connecting");
-        if let Err(e) = peripheral.connect_with_timeout(timeout).await {
-            // A timed-out connect can leave the attempt pending on the OS side.
+        // If this future is dropped mid-attempt (a reconnecting stream being
+        // stopped), the OS may still complete the connect later and hold the
+        // device with nothing attached; the guard releases it.
+        let mut guard = ConnectGuard {
+            peripheral: Some(peripheral.clone()),
+        };
+        let attempt = async {
+            peripheral.connect_with_timeout(timeout).await?;
+            peripheral.discover_services().await
+        };
+        let outcome = tokio::time::timeout(timeout, attempt)
+            .await
+            .map_err(|_| TransportError::Timeout)
+            .and_then(|r| r.map_err(map_err));
+        guard.peripheral = None;
+        if let Err(e) = outcome {
+            // A timed-out or failed attempt can leave the link half-open on
+            // the OS side; releasing it is best effort.
             let _ = peripheral.disconnect().await;
-            return Err(map_err(e).into());
-        }
-        if let Err(e) = peripheral.discover_services().await {
-            let _ = peripheral.disconnect().await;
-            return Err(map_err(e).into());
+            return Err(e.into());
         }
         let characteristics = peripheral
             .characteristics()
@@ -247,27 +259,11 @@ impl Adapter {
         }))
     }
 
-    /// Forgets every peripheral the platform has cached.
-    ///
-    /// Required before re-scanning for a device that disconnected: on
-    /// `CoreBluetooth` btleplug otherwise keeps a stale handle whose
-    /// notification stream stays silent forever. This affects every device
-    /// known to the adapter, so callers should own the adapter exclusively.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the backend refuses.
-    pub async fn forget_devices(&self) -> Result<()> {
-        // Stopping first avoids `BlueZ` rejecting a later start_scan as
-        // "in progress"; a failure here is harmless.
-        let _ = self.inner.stop_scan().await;
-        Ok(self.inner.clear_peripherals().await.map_err(map_err)?)
-    }
-
     /// Shared scan loop. Filters on the Fluke reading service both in the
     /// platform filter and again on the advertisement, because `BlueZ` merges
     /// scan filters from all D-Bus clients. Stops early once `stop` returns
-    /// true for a discovered device.
+    /// true for a discovered device. A scan abandoned mid-window (the future
+    /// dropped) is stopped by the next scan's pre-start `stop_scan`.
     async fn scan_until(
         &self,
         timeout: Duration,
@@ -283,10 +279,6 @@ impl Adapter {
             })
             .await
             .map_err(map_err)?;
-        let mut guard = ScanGuard {
-            adapter: self.inner.clone(),
-            armed: true,
-        };
 
         let mut found: Vec<DiscoveredDevice> = Vec::new();
         let deadline = tokio::time::sleep(timeout);
@@ -316,7 +308,6 @@ impl Adapter {
             }
         }
         // Stopping the scan is best effort; a failure here must not hide results.
-        guard.armed = false;
         let _ = self.inner.stop_scan().await;
         Ok(found)
     }
@@ -344,24 +335,20 @@ impl Adapter {
     }
 }
 
-/// Stops a scan if the scanning future is dropped mid-window, for example
-/// when a reconnecting stream is stopped during a scan.
-struct ScanGuard {
-    /// Adapter that is scanning.
-    adapter: platform::Adapter,
-    /// Whether the scan is still running when dropped.
-    armed: bool,
+/// Disconnects a peripheral whose connect attempt was abandoned mid-flight.
+struct ConnectGuard {
+    /// The peripheral being connected, until the attempt completes.
+    peripheral: Option<platform::Peripheral>,
 }
 
-impl Drop for ScanGuard {
+impl Drop for ConnectGuard {
     fn drop(&mut self) {
-        if !self.armed {
+        let Some(peripheral) = self.peripheral.take() else {
             return;
-        }
+        };
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let adapter = self.adapter.clone();
             handle.spawn(async move {
-                let _ = adapter.stop_scan().await;
+                let _ = peripheral.disconnect().await;
             });
         }
     }
@@ -381,9 +368,15 @@ impl Connector for AddressConnector {
     type Transport = BtleplugTransport;
 
     async fn find(&self, window: Duration) -> Result<Option<DiscoveredDevice>> {
-        // After a disconnect only a freshly scanned handle works; forgetting
-        // the cache is what makes the next scan produce one.
-        self.adapter.forget_devices().await?;
+        // After a disconnect only a freshly scanned handle works: on
+        // `CoreBluetooth` btleplug otherwise keeps a stale one whose
+        // notification stream stays silent forever. Clearing affects every
+        // device the adapter knows, which is why this stays private.
+        self.adapter
+            .inner
+            .clear_peripherals()
+            .await
+            .map_err(map_err)?;
         self.adapter.find_by_address(&self.address, window).await
     }
 

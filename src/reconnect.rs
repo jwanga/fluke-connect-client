@@ -16,6 +16,7 @@
 //! without hardware; the built-in Bluetooth backend provides one through
 //! `backend::Adapter::readings_with_reconnect`.
 
+use core::convert::Infallible;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -102,6 +103,23 @@ impl Default for ReconnectPolicy {
     }
 }
 
+impl ReconnectPolicy {
+    /// Jittered delay before retry number `retry` (1-based): uniform in
+    /// `[0, min(initial_backoff * 2^(retry - 1), max_backoff)]`.
+    fn backoff(&self, retry: u32) -> Duration {
+        let factor = 2_u32.saturating_pow(retry.saturating_sub(1));
+        let cap = self
+            .initial_backoff
+            .saturating_mul(factor)
+            .min(self.max_backoff);
+        let cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX);
+        // `RandomState` is randomly seeded per instance, which is all the
+        // randomness jitter needs; it avoids a dependency on a rand crate.
+        let roll = RandomState::new().build_hasher().finish();
+        Duration::from_millis(roll.checked_rem(cap_ms.saturating_add(1)).unwrap_or(0))
+    }
+}
+
 /// One step in the life of a reconnecting stream.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -116,7 +134,7 @@ pub enum Event {
     Disconnected,
     /// A scan window passed without seeing the device; scanning again.
     WaitingForDevice,
-    /// A connect attempt failed; sleeping `delay` before the next one.
+    /// A connect attempt or a scan failed; sleeping `delay` before the next one.
     Retrying {
         /// Consecutive failed attempts so far, counting this one.
         attempt: u32,
@@ -192,10 +210,6 @@ impl ReconnectingReadings {
         let task = tokio::spawn(async move {
             let mut runner = Runner {
                 connector,
-                backoff: Backoff {
-                    initial: policy.initial_backoff,
-                    max: policy.max_backoff,
-                },
                 policy,
                 tx,
                 stop: stop_rx,
@@ -247,35 +261,12 @@ enum Exit {
     GaveUp,
 }
 
-/// What a session step produced.
-enum Step {
-    /// Stop was requested.
-    Stop,
-    /// The reading stream yielded an item, or ended (`None`).
-    Item(Option<Result<ReadingNotification>>),
-}
-
-/// Exponential backoff with full jitter.
-#[derive(Debug)]
-struct Backoff {
-    /// Delay cap for the first retry.
-    initial: Duration,
-    /// Upper bound on the cap.
-    max: Duration,
-}
-
-impl Backoff {
-    /// Delay for retry number `retry` (1-based): uniform in
-    /// `[0, min(initial * 2^(retry - 1), max)]`.
-    fn delay(&self, retry: u32) -> Duration {
-        let factor = 2_u32.saturating_pow(retry.saturating_sub(1));
-        let cap = self.initial.saturating_mul(factor).min(self.max);
-        let cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX);
-        // `RandomState` is randomly seeded per instance, which is all the
-        // randomness jitter needs; it avoids a dependency on a rand crate.
-        let roll = RandomState::new().build_hasher().finish();
-        Duration::from_millis(roll.checked_rem(cap_ms.saturating_add(1)).unwrap_or(0))
-    }
+/// How a connected session ended.
+enum Outcome {
+    /// The reading stream ended: the link is gone.
+    LinkLost,
+    /// Subscribing failed after the link came up; the handle is dead.
+    Failed(Error),
 }
 
 /// Resolves when stop is requested; pends forever if every [`StopHandle`]
@@ -283,6 +274,18 @@ impl Backoff {
 async fn stopped(rx: &mut watch::Receiver<bool>) {
     if rx.wait_for(|stop| *stop).await.is_err() {
         core::future::pending::<()>().await;
+    }
+}
+
+/// Runs `work` unless stop is requested first.
+async fn unless_stopped<F: Future>(
+    stop: &mut watch::Receiver<bool>,
+    work: F,
+) -> core::result::Result<F::Output, Exit> {
+    tokio::select! {
+        biased;
+        () = stopped(stop) => Err(Exit::Stopped),
+        output = work => Ok(output),
     }
 }
 
@@ -295,8 +298,6 @@ async fn disconnect_quietly<T: Transport>(device: &FlukeDevice<T>) {
 struct Runner<C: Connector> {
     /// Finds and connects to the device.
     connector: C,
-    /// Retry delays.
-    backoff: Backoff,
     /// Tunables.
     policy: ReconnectPolicy,
     /// Where events go.
@@ -309,102 +310,77 @@ struct Runner<C: Connector> {
 
 impl<C: Connector> Runner<C> {
     /// The supervisor loop: scan, connect with retries, stream, repeat.
-    async fn run(&mut self, mut initial: Option<C::Target>) -> Exit {
-        'outer: loop {
+    async fn run(
+        &mut self,
+        mut initial: Option<C::Target>,
+    ) -> core::result::Result<Infallible, Exit> {
+        loop {
             let target = match initial.take() {
                 Some(target) => target,
-                None => match self.find().await {
-                    Ok(Some(target)) => target,
-                    Ok(None) => continue 'outer,
-                    Err(exit) => return exit,
+                None => match self.find().await? {
+                    Some(target) => target,
+                    None => continue,
                 },
             };
             for retry in 1..=self.policy.connect_attempts_per_scan.max(1) {
-                let connected = tokio::select! {
-                    biased;
-                    () = stopped(&mut self.stop) => return Exit::Stopped,
-                    connected = self.connector.connect(&target, self.policy.connect_timeout) => connected,
-                };
-                let device = match connected {
+                let connect = self.connector.connect(&target, self.policy.connect_timeout);
+                let device = match unless_stopped(&mut self.stop, connect).await? {
                     Ok(device) => device,
                     Err(error) => {
-                        if let Err(exit) = self.failure(retry, error).await {
-                            return exit;
-                        }
+                        self.failure(retry, error).await?;
                         continue;
                     }
                 };
-                let subscribed = tokio::select! {
-                    biased;
-                    () = stopped(&mut self.stop) => {
-                        disconnect_quietly(&device).await;
-                        return Exit::Stopped;
+                match self.session(&device).await {
+                    Ok(Outcome::LinkLost) => {
+                        self.emit(Event::Disconnected).await?;
+                        break;
                     }
-                    subscribed = device.readings() => subscribed,
-                };
-                let mut readings = match subscribed {
-                    Ok(readings) => readings,
-                    Err(error) => {
-                        disconnect_quietly(&device).await;
-                        if let Err(exit) = self.failure(retry, error).await {
-                            return exit;
-                        }
-                        continue;
+                    Ok(Outcome::Failed(error)) => {
+                        // The handle is dead; back off, then go to a fresh scan.
+                        self.failure(retry, error).await?;
+                        break;
                     }
-                };
-                self.attempts = 0;
-                if let Err(exit) = self.emit(Event::Connected).await {
-                    disconnect_quietly(&device).await;
-                    return exit;
-                }
-                loop {
-                    let step = tokio::select! {
-                        biased;
-                        () = stopped(&mut self.stop) => Step::Stop,
-                        item = readings.next() => Step::Item(item),
-                    };
-                    let event = match step {
-                        Step::Stop => {
-                            disconnect_quietly(&device).await;
-                            return Exit::Stopped;
-                        }
-                        Step::Item(Some(Ok(reading))) => Event::Reading(reading),
-                        Step::Item(Some(Err(error))) => Event::BadReading(error),
-                        Step::Item(None) => {
-                            if let Err(exit) = self.emit(Event::Disconnected).await {
-                                return exit;
-                            }
-                            continue 'outer;
-                        }
-                    };
-                    if let Err(exit) = self.emit(event).await {
+                    Err(exit) => {
                         disconnect_quietly(&device).await;
-                        return exit;
+                        return Err(exit);
                     }
                 }
             }
         }
     }
 
+    /// Subscribes and forwards readings until the link drops.
+    async fn session(
+        &mut self,
+        device: &FlukeDevice<C::Transport>,
+    ) -> core::result::Result<Outcome, Exit> {
+        let mut readings = match unless_stopped(&mut self.stop, device.readings()).await? {
+            Ok(readings) => readings,
+            Err(error) => {
+                disconnect_quietly(device).await;
+                return Ok(Outcome::Failed(error));
+            }
+        };
+        self.attempts = 0;
+        self.emit(Event::Connected).await?;
+        loop {
+            match unless_stopped(&mut self.stop, readings.next()).await? {
+                Some(Ok(reading)) => self.emit(Event::Reading(reading)).await?,
+                Some(Err(error)) => self.emit(Event::BadReading(error)).await?,
+                None => return Ok(Outcome::LinkLost),
+            }
+        }
+    }
+
     /// Runs one scan window. `Ok(None)` means "not seen, scan again".
     async fn find(&mut self) -> core::result::Result<Option<C::Target>, Exit> {
-        let found = tokio::select! {
-            biased;
-            () = stopped(&mut self.stop) => return Err(Exit::Stopped),
-            found = self.connector.find(self.policy.scan_window) => found,
-        };
-        match found {
+        let find = self.connector.find(self.policy.scan_window);
+        match unless_stopped(&mut self.stop, find).await? {
             Ok(Some(target)) => Ok(Some(target)),
             Ok(None) => {
-                self.attempts = self.attempts.saturating_add(1);
-                if self.gave_up() {
-                    let _ = self.tx.try_send(Event::GaveUp {
-                        attempts: self.attempts,
-                        last_error: Error::NotFound,
-                    });
-                    return Err(Exit::GaveUp);
-                }
                 // No sleep: the empty window already paced us.
+                let _ = self.count_failure(Error::NotFound).await?;
                 self.emit(Event::WaitingForDevice).await?;
                 Ok(None)
             }
@@ -415,45 +391,47 @@ impl<C: Connector> Runner<C> {
         }
     }
 
-    /// Records a failed attempt, emits [`Event::Retrying`] and sleeps the
-    /// backoff delay, or ends the stream with [`Event::GaveUp`].
-    async fn failure(&mut self, retry: u32, error: Error) -> core::result::Result<(), Exit> {
+    /// Counts a failed attempt. Ends the stream with [`Event::GaveUp`] when
+    /// the budget is exhausted, otherwise hands the error back.
+    async fn count_failure(&mut self, error: Error) -> core::result::Result<Error, Exit> {
         self.attempts = self.attempts.saturating_add(1);
-        if self.gave_up() {
-            let _ = self.tx.try_send(Event::GaveUp {
-                attempts: self.attempts,
-                last_error: error,
-            });
+        if self
+            .policy
+            .max_attempts
+            .is_some_and(|max| self.attempts >= max)
+        {
+            // The stream ends either way; a lost final event is acceptable
+            // only if the consumer is already gone or stopping.
+            let _ = self
+                .emit(Event::GaveUp {
+                    attempts: self.attempts,
+                    last_error: error,
+                })
+                .await;
             return Err(Exit::GaveUp);
         }
-        let delay = self.backoff.delay(retry);
+        Ok(error)
+    }
+
+    /// Records a failed attempt, emits [`Event::Retrying`] and sleeps the
+    /// backoff delay.
+    async fn failure(&mut self, retry: u32, error: Error) -> core::result::Result<(), Exit> {
+        let error = self.count_failure(error).await?;
+        let delay = self.policy.backoff(retry);
         self.emit(Event::Retrying {
             attempt: self.attempts,
             delay,
             error,
         })
         .await?;
-        tokio::select! {
-            biased;
-            () = stopped(&mut self.stop) => Err(Exit::Stopped),
-            () = tokio::time::sleep(delay) => Ok(()),
-        }
-    }
-
-    /// Whether the attempt budget is exhausted.
-    fn gave_up(&self) -> bool {
-        self.policy
-            .max_attempts
-            .is_some_and(|max| self.attempts >= max)
+        unless_stopped(&mut self.stop, tokio::time::sleep(delay)).await
     }
 
     /// Sends an event, racing against stop and consumer loss.
     async fn emit(&mut self, event: Event) -> core::result::Result<(), Exit> {
-        tokio::select! {
-            biased;
-            () = stopped(&mut self.stop) => Err(Exit::Stopped),
-            sent = self.tx.send(event) => sent.map_err(|_| Exit::ConsumerGone),
-        }
+        unless_stopped(&mut self.stop, self.tx.send(event))
+            .await?
+            .map_err(|_| Exit::ConsumerGone)
     }
 }
 
@@ -461,23 +439,20 @@ impl<C: Connector> Runner<C> {
 mod tests {
     use std::time::Duration;
 
-    use super::{Backoff, ReconnectPolicy};
+    use super::ReconnectPolicy;
 
     #[test]
     fn backoff_is_bounded_by_the_exponential_cap() {
-        let backoff = Backoff {
-            initial: Duration::from_secs(1),
-            max: Duration::from_secs(15),
-        };
+        let backoff = ReconnectPolicy::default();
         for retry in 1_u32..=8 {
             let cap = Duration::from_secs(1)
                 .saturating_mul(2_u32.saturating_pow(retry.saturating_sub(1)))
                 .min(Duration::from_secs(15));
             for _ in 0..200 {
-                assert!(backoff.delay(retry) <= cap, "retry {retry}");
+                assert!(backoff.backoff(retry) <= cap, "retry {retry}");
             }
         }
-        assert!(backoff.delay(u32::MAX) <= Duration::from_secs(15));
+        assert!(backoff.backoff(u32::MAX) <= Duration::from_secs(15));
     }
 
     #[test]
