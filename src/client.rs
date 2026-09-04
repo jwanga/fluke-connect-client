@@ -3,8 +3,10 @@
 use futures_util::StreamExt as _;
 
 use crate::error::{Error, Result};
-use crate::protocol::{AsciiReading, ProtocolError, ReadingNotification, uuids};
-use crate::transport::{BoxStream, Transport, TransportError};
+use crate::protocol::{
+    AsciiReading, MeasurementNotification, ProtocolError, ReadingNotification, uuids,
+};
+use crate::transport::{BoxStream, Notification, Transport, TransportError};
 
 /// Maximum length in bytes of the user-assignable device name.
 pub const MAX_NAME_LEN: usize = 98;
@@ -58,8 +60,52 @@ impl<T: Transport> FlukeDevice<T> {
         self.transport
     }
 
+    /// Subscribes to whichever reading characteristics the device exposes
+    /// and returns a stream of measurements from the best one.
+    ///
+    /// Both the binary reading and the ASCII display characteristic are
+    /// subscribed when present. Every device known to populate the ASCII
+    /// display also carries the binary record, and the record is richer
+    /// (function, attribute, range, secondary display), so the stream locks
+    /// onto the binary characteristic when its first notification arrives
+    /// and drops ASCII notifications from then on. Until that moment ASCII
+    /// notifications are yielded, so a meter whose binary characteristic
+    /// stays silent still produces measurements. Use
+    /// [`readings`](Self::readings) or [`ascii_readings`](Self::ascii_readings)
+    /// to pin one source.
+    ///
+    /// Payloads that fail to decode are yielded as errors so a consumer can
+    /// log them without losing the stream, which ends when the connection is
+    /// lost. A malformed binary payload still counts as arrival and locks the
+    /// stream onto the binary characteristic.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoReadingCharacteristic`] if the device exposes
+    /// neither characteristic, or the transport's error if opening the
+    /// notification stream or a subscription fails for any other reason.
+    pub async fn measurements(
+        &self,
+    ) -> Result<BoxStream<'static, Result<MeasurementNotification>>> {
+        // Same order as `subscribed`: open the stream first so nothing
+        // notified during subscription is lost.
+        let notifications = self.transport.notifications().await?;
+        let binary = self.try_subscribe(uuids::BINARY_READING).await?;
+        let ascii = self.try_subscribe(uuids::ASCII_READING).await?;
+        if !binary && !ascii {
+            return Err(Error::NoReadingCharacteristic);
+        }
+        let mut binary_locked = false;
+        // `ready` keeps the closure's only capture a `bool`, so the stream
+        // stays `Send + 'static` without shared state.
+        Ok(notifications
+            .filter_map(move |n| core::future::ready(select(&mut binary_locked, &n)))
+            .boxed())
+    }
+
     /// Subscribes to the binary reading characteristic and returns a stream
-    /// of decoded readings.
+    /// of decoded readings. Prefer [`measurements`](Self::measurements)
+    /// unless you specifically want the binary record.
     ///
     /// The stream ends when the transport reports that the connection was
     /// lost. Payloads that fail to decode are yielded as errors so a
@@ -86,7 +132,8 @@ impl<T: Transport> FlukeDevice<T> {
     }
 
     /// Subscribes to the ASCII display characteristic and returns a stream
-    /// of decoded display strings.
+    /// of decoded display strings. Prefer [`measurements`](Self::measurements)
+    /// unless you specifically want the text.
     ///
     /// The 376 FC and 902 FC clamps populate this characteristic and other
     /// family members may; the ir3000 FC exposes it but never notifies, so
@@ -257,6 +304,18 @@ impl<T: Transport> FlukeDevice<T> {
         Ok(self.transport.disconnect().await?)
     }
 
+    /// Enables notifications on a characteristic, reporting whether the
+    /// device exposes it: `Ok(false)` when the transport says
+    /// [`TransportError::CharacteristicNotFound`], any other failure as an
+    /// error.
+    async fn try_subscribe(&self, characteristic: u128) -> Result<bool> {
+        match self.transport.subscribe(characteristic).await {
+            Ok(()) => Ok(true),
+            Err(TransportError::CharacteristicNotFound(_)) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Reads a string characteristic, mapping "not found" to `None`.
     async fn optional_string(&self, characteristic: u128) -> Result<Option<String>> {
         match self.transport.read(characteristic).await {
@@ -277,6 +336,32 @@ impl<T: Transport> FlukeDevice<T> {
                 move |n| async move { (n.characteristic == characteristic).then_some(n.value) },
             )
             .boxed())
+    }
+}
+
+/// Decides what the measurement stream yields for one notification.
+///
+/// `binary_locked` remembers whether a binary notification has arrived; it
+/// is set on the first one (decodable or not) and from then on ASCII
+/// notifications are dropped. Notifications from any other characteristic
+/// are always dropped. Kept synchronous and transport-free so the policy can
+/// be unit tested.
+fn select(binary_locked: &mut bool, n: &Notification) -> Option<Result<MeasurementNotification>> {
+    match n.characteristic {
+        uuids::BINARY_READING => {
+            *binary_locked = true;
+            Some(
+                ReadingNotification::from_bytes(&n.value)
+                    .map(MeasurementNotification::from)
+                    .map_err(Error::from),
+            )
+        }
+        uuids::ASCII_READING if !*binary_locked => Some(
+            AsciiReading::from_bytes(&n.value)
+                .map(MeasurementNotification::from)
+                .map_err(Error::from),
+        ),
+        _ => None,
     }
 }
 
@@ -302,8 +387,79 @@ fn decode_string(bytes: &[u8]) -> Result<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests may fail loudly")]
 mod tests {
-    use super::decode_string;
+    use super::{decode_string, select};
+    use crate::error::Error;
+    use crate::protocol::{ProtocolError, test_hex, uuids};
+    use crate::transport::Notification;
+
+    /// Builds a notification for `select`.
+    fn notification(characteristic: u128, value: &[u8]) -> Notification {
+        Notification {
+            characteristic,
+            value: value.to_vec(),
+        }
+    }
+
+    #[test]
+    fn select_yields_ascii_until_binary_arrives_then_drops_it() {
+        let mut locked = false;
+        let ascii = notification(
+            uuids::ASCII_READING,
+            &test_hex("00202020392e3220560020206463202020"),
+        );
+        let first = select(&mut locked, &ascii).unwrap().unwrap();
+        assert!(first.primary().as_ascii().is_some());
+        assert!(!locked);
+
+        assert!(select(&mut locked, &notification(uuids::BATTERY_LEVEL, &[60])).is_none());
+
+        let binary = notification(
+            uuids::BINARY_READING,
+            &test_hex("00000002010700000000000202070000"),
+        );
+        let second = select(&mut locked, &binary).unwrap().unwrap();
+        assert!(second.secondary().is_some());
+        assert!(locked);
+
+        assert!(select(&mut locked, &ascii).is_none());
+    }
+
+    #[test]
+    fn select_locks_on_a_malformed_binary_payload() {
+        let mut locked = false;
+        let bad = notification(uuids::BINARY_READING, &[1, 2, 3]);
+        assert!(matches!(
+            select(&mut locked, &bad),
+            Some(Err(Error::Protocol(_)))
+        ));
+        assert!(locked);
+        let ascii = notification(
+            uuids::ASCII_READING,
+            &test_hex("00202020392e3220560020206463202020"),
+        );
+        assert!(select(&mut locked, &ascii).is_none());
+    }
+
+    #[test]
+    fn select_never_locks_without_binary() {
+        let mut locked = false;
+        let placeholder = notification(
+            uuids::ASCII_READING,
+            &test_hex("0102030405000000000000000000000000"),
+        );
+        assert!(matches!(
+            select(&mut locked, &placeholder),
+            Some(Err(Error::Protocol(ProtocolError::UnsupportedFormat(1))))
+        ));
+        let ascii = notification(
+            uuids::ASCII_READING,
+            &test_hex("00202020392e3220560020206463202020"),
+        );
+        assert!(select(&mut locked, &ascii).unwrap().is_ok());
+        assert!(!locked);
+    }
 
     #[test]
     fn strings_are_trimmed_of_nul_and_spaces() {

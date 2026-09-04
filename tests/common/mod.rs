@@ -28,7 +28,7 @@ pub(crate) fn hex(s: &str) -> Vec<u8> {
     reason = "test double; async trait methods are implemented synchronously"
 )]
 pub(crate) mod mock {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -61,6 +61,9 @@ pub(crate) mod mock {
         disconnects: Arc<AtomicUsize>,
         /// When set, `subscribe` fails.
         fail_subscribe: Arc<AtomicBool>,
+        /// Characteristics the device does not expose; `subscribe` reports
+        /// them as not found.
+        missing: Arc<Mutex<HashSet<u128>>>,
     }
 
     impl MockTransport {
@@ -76,7 +79,14 @@ pub(crate) mod mock {
                 closed,
                 disconnects: Arc::default(),
                 fail_subscribe: Arc::default(),
+                missing: Arc::default(),
             }
+        }
+
+        /// Removes a characteristic from the device.
+        pub(crate) fn without_characteristic(self, characteristic: u128) -> Self {
+            self.missing.lock().unwrap().insert(characteristic);
+            self
         }
 
         /// Adds a readable value.
@@ -139,6 +149,9 @@ pub(crate) mod mock {
         }
 
         async fn subscribe(&self, characteristic: u128) -> Result<(), TransportError> {
+            if self.missing.lock().unwrap().contains(&characteristic) {
+                return Err(TransportError::CharacteristicNotFound(characteristic));
+            }
             if self.fail_subscribe.load(Ordering::SeqCst) {
                 return Err(TransportError::NotConnected);
             }
