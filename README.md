@@ -9,8 +9,10 @@ and adapters from Rust.
 
 Fluke Connect devices share one vendor GATT profile. This crate decodes it
 and, with the default `ble` feature, discovers devices, connects, and
-streams decoded readings as an async `Stream`: the binary reading record,
-and on meters that populate it, the ASCII display string. It also exposes the
+streams decoded readings as an async `Stream`. `measurements()` subscribes
+to both reading characteristics and locks onto the richer binary record as
+soon as the device sends it; the binary and ASCII streams are also available
+individually. It also exposes the
 housekeeping characteristics: device information, battery level, locator
 LED, ID number, device name and clock (the clock write is inert on the
 ir3000 FC).
@@ -58,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let info = device.device_info().await?;
     println!("connected to {:?}", info.model);
 
-    let mut readings = device.readings().await?;
+    let mut readings = device.measurements().await?;
     while let Some(reading) = readings.next().await {
         let reading = reading?;
         println!("{}", reading.primary());
@@ -132,8 +134,9 @@ assert_eq!(reading.to_string(), "546.0 mV DC");
 ```
 
 Clamp meters such as the 376 FC and 902 FC also publish the display as
-text on a second characteristic. `FlukeDevice::ascii_readings` streams it
-and `AsciiReading` decodes it with the same value and unit semantics:
+text on a second characteristic. `measurements()` falls back to it
+automatically; `FlukeDevice::ascii_readings` streams it alone, and
+`AsciiReading` decodes it with the same value and unit semantics:
 
 ```rust
 use fluke_connect_client::{AsciiReading, AsciiState, Unit};
@@ -156,8 +159,9 @@ cargo install fluke-connect-client --features cli
 fluke-connect doctor              # adapter state and permission hints
 fluke-connect scan                # list Fluke Connect devices in range
 fluke-connect info                # device information, battery, name, ID
-fluke-connect stream              # live readings; --json for machine output
-fluke-connect stream --ascii      # the ASCII display string (376 FC, 902 FC and similar)
+fluke-connect stream              # live readings, auto-selecting the source; --json for machine output
+fluke-connect stream --binary     # the binary record only
+fluke-connect stream --ascii      # the ASCII display string only (376 FC, 902 FC and similar)
 fluke-connect stream --reconnect  # keep streaming across disconnects
 fluke-connect dump readings.jsonl # raw notification capture for bug reports
 fluke-connect locator on          # blink the device LED

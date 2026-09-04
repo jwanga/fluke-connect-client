@@ -27,6 +27,10 @@ pub enum Error {
     /// No matching device was found before the timeout elapsed.
     #[error("no Fluke Connect device found")]
     NotFound,
+    /// The device exposes neither the binary nor the ASCII reading
+    /// characteristic, so there is nothing to stream.
+    #[error("device exposes no reading characteristic")]
+    NoReadingCharacteristic,
 }
 
 /// Convenience alias for results using [`Error`].

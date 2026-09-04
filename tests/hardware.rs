@@ -38,7 +38,7 @@ async fn streams_readings_from_a_real_device() {
     let battery = device.battery_level().await.expect("battery level");
     assert!(battery <= 100);
 
-    let mut readings = device.readings().await.expect("subscribe");
+    let mut readings = device.measurements().await.expect("subscribe");
     for _ in 0..5 {
         let next = tokio::time::timeout(Duration::from_secs(10), readings.next())
             .await

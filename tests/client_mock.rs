@@ -19,6 +19,15 @@ use futures_util::StreamExt as _;
 use common::hex;
 use common::mock::MockTransport;
 
+/// Binary record with a populated secondary display (289 in V AC `LoZ`).
+const LOZ: &str = "00000002010700000000000202070000";
+/// Binary temperature record.
+const TEMPERATURE: &str = "01030002082200000000000000000000";
+/// ASCII 9.2 V DC from a 376 FC.
+const ASCII_VOLTS: &str = "00202020392e3220560020206463202020";
+/// The ir3000 FC placeholder on the ASCII characteristic.
+const PLACEHOLDER: &str = "0102030405000000000000000000000000";
+
 #[tokio::test]
 async fn readings_stream_decodes_binary_notifications_only() {
     let mock = MockTransport::new();
@@ -30,14 +39,8 @@ async fn readings_stream_decodes_binary_notifications_only() {
     );
 
     mock.notify(uuids::BATTERY_LEVEL, &[60]);
-    mock.notify(
-        uuids::BINARY_READING,
-        &hex("01030002082200000000000000000000"),
-    );
-    mock.notify(
-        uuids::BINARY_READING,
-        &hex("00000002010700000000000202070000"),
-    );
+    mock.notify(uuids::BINARY_READING, &hex(TEMPERATURE));
+    mock.notify(uuids::BINARY_READING, &hex(LOZ));
     mock.notify(uuids::BINARY_READING, &[1, 2, 3]);
 
     let first = readings.next().await.unwrap().unwrap();
@@ -140,18 +143,9 @@ async fn ascii_readings_stream_decodes_ascii_notifications_only() {
         &[uuids::ASCII_READING]
     );
 
-    mock.notify(
-        uuids::BINARY_READING,
-        &hex("01030002082200000000000000000000"),
-    );
-    mock.notify(
-        uuids::ASCII_READING,
-        &hex("00202020392e3220560020206463202020"),
-    );
-    mock.notify(
-        uuids::ASCII_READING,
-        &hex("0102030405000000000000000000000000"),
-    );
+    mock.notify(uuids::BINARY_READING, &hex(TEMPERATURE));
+    mock.notify(uuids::ASCII_READING, &hex(ASCII_VOLTS));
+    mock.notify(uuids::ASCII_READING, &hex(PLACEHOLDER));
     mock.notify(uuids::ASCII_READING, &[1, 2, 3]);
 
     let first = readings.next().await.unwrap().unwrap();
@@ -186,4 +180,119 @@ async fn current_ascii_reading_reports_a_missing_characteristic() {
         device.current_ascii_reading().await,
         Err(Error::Transport(TransportError::CharacteristicNotFound(_)))
     ));
+}
+
+#[tokio::test]
+async fn measurements_prefer_binary_once_it_notifies() {
+    let mock = MockTransport::new();
+    let device = FlukeDevice::new(mock.clone());
+    let mut measurements = device.measurements().await.unwrap();
+    assert_eq!(
+        mock.subscriptions.lock().unwrap().as_slice(),
+        &[uuids::BINARY_READING, uuids::ASCII_READING]
+    );
+
+    mock.notify(uuids::ASCII_READING, &hex(ASCII_VOLTS));
+    mock.notify(uuids::BATTERY_LEVEL, &[60]);
+    mock.notify(uuids::BINARY_READING, &hex(LOZ));
+    mock.notify(uuids::ASCII_READING, &hex(ASCII_VOLTS));
+    mock.notify(uuids::BINARY_READING, &hex(TEMPERATURE));
+    mock.notify(uuids::BINARY_READING, &[1, 2, 3]);
+
+    let first = measurements.next().await.unwrap().unwrap();
+    assert!(first.primary().as_ascii().is_some());
+    assert_eq!(first.primary().display_value(), Some(9.2));
+    assert!(first.secondary().is_none());
+
+    let second = measurements.next().await.unwrap().unwrap();
+    assert_eq!(
+        second.primary().as_binary().unwrap().function(),
+        Function::VoltsAcLowZ
+    );
+    assert_eq!(second.secondary().unwrap().unit(), Unit::VoltsDc);
+
+    // The ASCII notification after lock-on is dropped: the next item is the
+    // temperature record, not 9.2 V.
+    let third = measurements.next().await.unwrap().unwrap();
+    assert_eq!(third.primary().display_value(), Some(76.9));
+    assert_eq!(third.primary().unit(), Unit::Fahrenheit);
+
+    let fourth = measurements.next().await.unwrap();
+    assert!(matches!(
+        fourth,
+        Err(Error::Protocol(ProtocolError::InvalidLength { .. }))
+    ));
+}
+
+#[tokio::test]
+async fn measurements_use_binary_when_ascii_is_missing() {
+    let mock = MockTransport::new().without_characteristic(uuids::ASCII_READING);
+    let device = FlukeDevice::new(mock.clone());
+    let mut measurements = device.measurements().await.unwrap();
+    assert_eq!(
+        mock.subscriptions.lock().unwrap().as_slice(),
+        &[uuids::BINARY_READING]
+    );
+
+    mock.notify(uuids::BINARY_READING, &hex(TEMPERATURE));
+    let item = measurements.next().await.unwrap().unwrap();
+    assert_eq!(item.primary().display_value(), Some(76.9));
+    assert!(item.secondary().is_none());
+}
+
+#[tokio::test]
+async fn measurements_use_ascii_when_binary_is_missing() {
+    let mock = MockTransport::new().without_characteristic(uuids::BINARY_READING);
+    let device = FlukeDevice::new(mock.clone());
+    let mut measurements = device.measurements().await.unwrap();
+    assert_eq!(
+        mock.subscriptions.lock().unwrap().as_slice(),
+        &[uuids::ASCII_READING]
+    );
+
+    mock.notify(uuids::ASCII_READING, &hex(ASCII_VOLTS));
+    mock.notify(uuids::ASCII_READING, &hex(PLACEHOLDER));
+    mock.notify(uuids::ASCII_READING, &hex(ASCII_VOLTS));
+
+    let first = measurements.next().await.unwrap().unwrap();
+    assert_eq!(first.primary().to_string(), "9.2 V DC");
+    let second = measurements.next().await.unwrap();
+    assert!(matches!(
+        second,
+        Err(Error::Protocol(ProtocolError::UnsupportedFormat(1)))
+    ));
+    // Never locks without a binary notification.
+    let third = measurements.next().await.unwrap().unwrap();
+    assert!(third.primary().as_ascii().is_some());
+}
+
+#[tokio::test]
+async fn measurements_fail_when_neither_characteristic_exists() {
+    let mock = MockTransport::new()
+        .without_characteristic(uuids::BINARY_READING)
+        .without_characteristic(uuids::ASCII_READING);
+    let device = FlukeDevice::new(mock.clone());
+    assert!(matches!(
+        device.measurements().await,
+        Err(Error::NoReadingCharacteristic)
+    ));
+    assert!(mock.subscriptions.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn measurements_propagate_other_subscribe_errors() {
+    let device = FlukeDevice::new(MockTransport::new().failing_subscribe());
+    assert!(matches!(
+        device.measurements().await,
+        Err(Error::Transport(TransportError::NotConnected))
+    ));
+}
+
+#[tokio::test]
+async fn measurements_stream_ends_when_transport_closes() {
+    let mock = MockTransport::new();
+    let device = FlukeDevice::new(mock.clone());
+    let mut measurements = device.measurements().await.unwrap();
+    mock.drop_link();
+    assert!(measurements.next().await.is_none());
 }

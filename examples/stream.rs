@@ -1,4 +1,4 @@
-//! Connects to the first Fluke Connect device in range and prints readings.
+//! Connects to the first Fluke Connect device in range and prints measurements.
 //!
 //! ```sh
 //! cargo run --example stream
@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         device.battery_level().await?
     );
 
-    let mut readings = device.readings().await?;
+    let mut readings = device.measurements().await?;
     while let Some(reading) = readings.next().await {
         match reading {
             Ok(reading) => {

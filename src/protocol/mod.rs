@@ -16,7 +16,7 @@ pub mod uuids;
 pub use ascii::{AsciiReading, AsciiState};
 pub use enums::{Attribute, Decade, Function, Magnitude, ReadingState, Unit};
 pub use error::ProtocolError;
-pub use measurement::Measurement;
+pub use measurement::{Measurement, MeasurementNotification};
 pub use notification::ReadingNotification;
 pub use reading::Reading;
 
