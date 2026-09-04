@@ -132,7 +132,7 @@ impl Connector for ScriptedConnector {
 const TEMPERATURE: &str = "01030002082200000000000000000000";
 /// ASCII 9.2 V DC from a 376 FC.
 const ASCII_VOLTS: &str = "00202020392e3220560020206463202020";
-/// Binary V AC LoZ record with a secondary display.
+/// Binary V AC `LoZ` record with a secondary display.
 const LOZ: &str = "00000002010700000000000202070000";
 
 fn policy() -> ReconnectPolicy {
@@ -150,7 +150,8 @@ async fn next<I>(events: &mut Reconnecting<I>) -> Event<I> {
 async fn connects_to_the_initial_target_without_scanning() {
     let transport = MockTransport::new();
     let connector = ScriptedConnector::new(vec![], vec![Step::Session(transport.clone())]);
-    let mut events = Reconnecting::new(connector.clone(), Readings, Some(()), policy());
+    let mut events: ReconnectingReadings =
+        Reconnecting::new(connector.clone(), Readings, Some(()), policy());
 
     assert!(matches!(next(&mut events).await, Event::Connected));
     assert_eq!(
