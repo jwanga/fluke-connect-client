@@ -508,7 +508,7 @@ async fn battery_source_yields_plain_levels() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_silent_link_is_dropped_at_the_idle_timeout() {
+async fn silent_link_is_dropped_at_the_idle_timeout() {
     let first = MockTransport::new();
     let second = MockTransport::new();
     let connector = ScriptedConnector::new(
@@ -534,7 +534,7 @@ async fn a_silent_link_is_dropped_at_the_idle_timeout() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_idle_watchdog_is_off_by_default() {
+async fn idle_watchdog_is_off_by_default() {
     let transport = MockTransport::new();
     let connector = ScriptedConnector::new(vec![], vec![Step::Session(transport.clone())]);
     let mut events = Reconnecting::new(connector, Readings, Some(()), policy());

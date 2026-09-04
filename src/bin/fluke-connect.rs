@@ -114,11 +114,13 @@ enum DeviceCommand {
         /// Emit one JSON object per line instead of text.
         #[arg(long)]
         json: bool,
-        /// Stream only the binary reading record; fails if the device lacks it.
+        /// Stream only the binary reading record. A device without it is an
+        /// error, or with --reconnect a failed attempt that is retried.
         #[arg(long, conflicts_with = "ascii")]
         binary: bool,
-        /// Stream only the ASCII display string (376 FC, 902 FC and similar);
-        /// fails if the device lacks it. Silent on an ir3000 FC.
+        /// Stream only the ASCII display string (376 FC, 902 FC and similar).
+        /// A device without it is an error, or with --reconnect a failed
+        /// attempt that is retried. Silent on an ir3000 FC.
         #[arg(long, conflicts_with = "binary")]
         ascii: bool,
         /// Re-scan and reconnect whenever the connection drops.
