@@ -1,6 +1,6 @@
 [package]
 name = "fluke-connect-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Read live measurements from Fluke Connect Bluetooth Low Energy meters and adapters (ir3000 FC, 3000 FC family)"
