@@ -19,8 +19,9 @@ use uuid::Uuid;
 
 use crate::client::FlukeDevice;
 use crate::error::{Error, Result};
+use crate::protocol::MeasurementNotification;
 use crate::protocol::uuids::READING_SERVICE;
-use crate::reconnect::{Connector, ReconnectPolicy, ReconnectingReadings};
+use crate::reconnect::{Connector, Measurements, ReconnectPolicy, Reconnecting, Source};
 use crate::transport::{BoxStream, Notification, Transport, TransportError};
 
 /// How long [`Adapter::connect`] waits for the GATT connection.
@@ -166,28 +167,6 @@ impl Adapter {
             .find(|d| d.address() == address))
     }
 
-    /// Streams readings from `device`, re-scanning and reconnecting whenever
-    /// the connection drops. See the [`reconnect`](crate::reconnect) module.
-    ///
-    /// The first attempt connects to `device` directly; every later attempt
-    /// forgets cached peripherals and scans for the device's address again,
-    /// which is what btleplug needs after a disconnect.
-    ///
-    /// # Panics
-    ///
-    /// Panics if called outside a Tokio runtime.
-    pub fn readings_with_reconnect(
-        &self,
-        device: &DiscoveredDevice,
-        policy: ReconnectPolicy,
-    ) -> ReconnectingReadings {
-        let connector = AddressConnector {
-            adapter: self.clone(),
-            address: device.address.clone(),
-        };
-        ReconnectingReadings::new(connector, Some(device.clone()), policy)
-    }
-
     /// Scans for the first device and connects to it.
     ///
     /// # Errors
@@ -197,6 +176,44 @@ impl Adapter {
     pub async fn connect_first(&self, timeout: Duration) -> Result<FlukeDevice<BtleplugTransport>> {
         let device = self.find_first(timeout).await?;
         self.connect(&device).await
+    }
+
+    /// Streams `source` from `device`, re-scanning and reconnecting whenever
+    /// the connection drops. See the [`reconnect`](crate::reconnect) module.
+    ///
+    /// The first attempt connects to `device` directly; every later attempt
+    /// forgets cached peripherals and scans for the device's address again,
+    /// which is what btleplug needs after a disconnect.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime.
+    pub fn stream_with_reconnect<S: Source<BtleplugTransport>>(
+        &self,
+        device: &DiscoveredDevice,
+        source: S,
+        policy: ReconnectPolicy,
+    ) -> Reconnecting<S::Item> {
+        let connector = AddressConnector {
+            adapter: self.clone(),
+            address: device.address.clone(),
+        };
+        Reconnecting::new(connector, source, Some(device.clone()), policy)
+    }
+
+    /// [`stream_with_reconnect`](Self::stream_with_reconnect) over the
+    /// auto-selecting measurement stream ([`Measurements`]); the choice for
+    /// most applications.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime.
+    pub fn measurements_with_reconnect(
+        &self,
+        device: &DiscoveredDevice,
+        policy: ReconnectPolicy,
+    ) -> Reconnecting<Result<MeasurementNotification>> {
+        self.stream_with_reconnect(device, Measurements, policy)
     }
 
     /// Connects to a discovered device and discovers its GATT table.

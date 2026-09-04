@@ -85,10 +85,11 @@ use futures_util::StreamExt as _;
 # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
 let adapter = Adapter::open().await?;
 let device = adapter.find_first(Duration::from_secs(60)).await?;
-let mut events = adapter.readings_with_reconnect(&device, ReconnectPolicy::default());
+let mut events = adapter.measurements_with_reconnect(&device, ReconnectPolicy::default());
 while let Some(event) = events.next().await {
     match event {
-        Event::Reading(reading) => println!("{}", reading.primary()),
+        Event::Item(Ok(measurement)) => println!("{}", measurement.primary()),
+        Event::Item(Err(e)) => eprintln!("bad reading: {e}"),
         Event::Disconnected => eprintln!("lost the device; reconnecting"),
         other => eprintln!("{other:?}"),
     }
@@ -98,7 +99,10 @@ while let Some(event) = events.next().await {
 
 `events.stop_handle()` returns a cloneable handle whose `stop()` disconnects
 cleanly and ends the stream; the `fluke-connect stream --reconnect` command
-calls it on Ctrl-C.
+calls it on Ctrl-C. `Adapter::stream_with_reconnect` accepts any
+`reconnect::Source`: the built-in `Measurements`, `Readings`, `AsciiReadings`
+and `BatteryUpdates` mirror the `FlukeDevice` streams, and the trait is small
+enough to implement for your own subscription.
 
 Code that does not care which characteristic a value came from can wrap
 either in `Measurement`, which exposes what both sources can answer:
@@ -162,7 +166,7 @@ fluke-connect info                # device information, battery, name, ID
 fluke-connect stream              # live readings, auto-selecting the source; --json for machine output
 fluke-connect stream --binary     # the binary record only
 fluke-connect stream --ascii      # the ASCII display string only (376 FC, 902 FC and similar)
-fluke-connect stream --reconnect  # keep streaming across disconnects
+fluke-connect stream --reconnect  # keep streaming across disconnects; combines with --binary / --ascii
 fluke-connect dump readings.jsonl # raw notification capture for bug reports
 fluke-connect locator on          # blink the device LED
 ```

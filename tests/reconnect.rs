@@ -21,7 +21,9 @@ use std::time::Duration;
 use common::hex;
 use common::mock::MockTransport;
 use fluke_connect_client::protocol::uuids;
-use fluke_connect_client::reconnect::{Connector, Event, ReconnectPolicy, ReconnectingReadings};
+use fluke_connect_client::reconnect::{
+    BatteryUpdates, Connector, Event, Measurements, Readings, ReconnectPolicy, Reconnecting,
+};
 use fluke_connect_client::transport::TransportError;
 use fluke_connect_client::{Error, FlukeDevice};
 use futures_util::StreamExt as _;
@@ -126,23 +128,43 @@ impl Connector for ScriptedConnector {
 }
 
 const TEMPERATURE: &str = "01030002082200000000000000000000";
+/// ASCII 9.2 V DC from a 376 FC.
+const ASCII_VOLTS: &str = "00202020392e3220560020206463202020";
 
 fn policy() -> ReconnectPolicy {
     ReconnectPolicy::default()
 }
 
-async fn next(events: &mut ReconnectingReadings) -> Event {
+async fn next<I>(events: &mut Reconnecting<I>) -> Event<I> {
     tokio::time::timeout(Duration::from_secs(3600), events.next())
         .await
         .expect("an event within the test horizon")
         .expect("stream still open")
 }
 
+/// The calls of a connect followed by one rescan-and-reconnect: a handle
+/// that has disconnected is dead, so the next attempt must scan again.
+fn rescan() -> Vec<Call> {
+    vec![
+        Call::Connect(Duration::from_secs(30)),
+        Call::Find(Duration::from_secs(30)),
+        Call::Connect(Duration::from_secs(30)),
+    ]
+}
+
+/// Drops `link` and waits for the supervisor to report the loss and the
+/// following reconnection.
+async fn reconnect_after_dropping<I>(events: &mut Reconnecting<I>, link: &MockTransport) {
+    link.drop_link();
+    assert!(matches!(next(events).await, Event::Disconnected));
+    assert!(matches!(next(events).await, Event::Connected));
+}
+
 #[tokio::test(start_paused = true)]
 async fn connects_to_the_initial_target_without_scanning() {
     let transport = MockTransport::new();
     let connector = ScriptedConnector::new(vec![], vec![Step::Session(transport.clone())]);
-    let mut events = ReconnectingReadings::new(connector.clone(), Some(()), policy());
+    let mut events = Reconnecting::new(connector.clone(), Readings, Some(()), policy());
 
     assert!(matches!(next(&mut events).await, Event::Connected));
     assert_eq!(
@@ -157,11 +179,11 @@ async fn connects_to_the_initial_target_without_scanning() {
     transport.notify(uuids::BINARY_READING, &hex(TEMPERATURE));
     transport.notify(uuids::BINARY_READING, &[1, 2, 3]);
     assert!(
-        matches!(next(&mut events).await, Event::Reading(r) if r.primary().display_value() == Some(76.9))
+        matches!(next(&mut events).await, Event::Item(Ok(r)) if r.primary().display_value() == Some(76.9))
     );
     assert!(matches!(
         next(&mut events).await,
-        Event::BadReading(Error::Protocol(_))
+        Event::Item(Err(Error::Protocol(_)))
     ));
     assert_eq!(
         connector.calls().len(),
@@ -178,22 +200,13 @@ async fn reconnects_by_rescanning_after_a_disconnect() {
         vec![Step::Found],
         vec![Step::Session(first.clone()), Step::Session(second.clone())],
     );
-    let mut events = ReconnectingReadings::new(connector.clone(), Some(()), policy());
+    let mut events = Reconnecting::new(connector.clone(), Readings, Some(()), policy());
 
     assert!(matches!(next(&mut events).await, Event::Connected));
-    first.drop_link();
-    assert!(matches!(next(&mut events).await, Event::Disconnected));
-    assert!(matches!(next(&mut events).await, Event::Connected));
+    reconnect_after_dropping(&mut events, &first).await;
     second.notify(uuids::BINARY_READING, &hex(TEMPERATURE));
-    assert!(matches!(next(&mut events).await, Event::Reading(_)));
-    assert_eq!(
-        connector.calls(),
-        vec![
-            Call::Connect(Duration::from_secs(30)),
-            Call::Find(Duration::from_secs(30)),
-            Call::Connect(Duration::from_secs(30)),
-        ]
-    );
+    assert!(matches!(next(&mut events).await, Event::Item(Ok(_))));
+    assert_eq!(connector.calls(), rescan());
 }
 
 #[tokio::test(start_paused = true)]
@@ -208,7 +221,7 @@ async fn backs_off_between_failed_connects() {
             Step::Session(transport),
         ],
     );
-    let mut events = ReconnectingReadings::new(connector.clone(), Some(()), policy());
+    let mut events = Reconnecting::new(connector.clone(), Readings, Some(()), policy());
 
     let mut delays = Vec::new();
     for expected_attempt in 1..=3_u32 {
@@ -250,7 +263,7 @@ async fn rescans_after_the_per_scan_connect_budget() {
     );
     let mut p = policy();
     p.connect_attempts_per_scan = 2;
-    let mut events = ReconnectingReadings::new(connector.clone(), Some(()), p);
+    let mut events = Reconnecting::new(connector.clone(), Readings, Some(()), p);
 
     assert!(matches!(
         next(&mut events).await,
@@ -280,7 +293,7 @@ async fn waits_for_the_device_without_backoff() {
         vec![Step::Session(transport)],
     );
     let start = Instant::now();
-    let mut events = ReconnectingReadings::new(connector.clone(), None, policy());
+    let mut events = Reconnecting::new(connector.clone(), Readings, None, policy());
 
     assert!(matches!(next(&mut events).await, Event::WaitingForDevice));
     assert!(matches!(next(&mut events).await, Event::WaitingForDevice));
@@ -295,7 +308,7 @@ async fn scan_errors_are_backed_off() {
         vec![Step::ScanError, Step::Found],
         vec![Step::Session(transport)],
     );
-    let mut events = ReconnectingReadings::new(connector, None, policy());
+    let mut events = Reconnecting::new(connector, Readings, None, policy());
 
     assert!(matches!(
         next(&mut events).await,
@@ -313,7 +326,7 @@ async fn gives_up_after_max_attempts() {
     let connector = ScriptedConnector::new(vec![], vec![Step::ConnectError, Step::ConnectError]);
     let mut p = policy();
     p.max_attempts = Some(2);
-    let mut events = ReconnectingReadings::new(connector, Some(()), p.clone());
+    let mut events = Reconnecting::new(connector, Readings, Some(()), p.clone());
     assert!(matches!(
         next(&mut events).await,
         Event::Retrying { attempt: 1, .. }
@@ -328,7 +341,7 @@ async fn gives_up_after_max_attempts() {
     assert!(events.next().await.is_none());
 
     let connector = ScriptedConnector::new(vec![Step::NotSeen, Step::NotSeen], vec![]);
-    let mut events = ReconnectingReadings::new(connector, None, p);
+    let mut events = Reconnecting::new(connector, Readings, None, p);
     assert!(matches!(next(&mut events).await, Event::WaitingForDevice));
     assert!(matches!(
         next(&mut events).await,
@@ -347,7 +360,7 @@ async fn stop_during_backoff_ends_the_stream_promptly() {
     p.initial_backoff = Duration::from_secs(3600);
     p.max_backoff = Duration::from_secs(3600);
     let start = Instant::now();
-    let mut events = ReconnectingReadings::new(connector.clone(), Some(()), p);
+    let mut events = Reconnecting::new(connector.clone(), Readings, Some(()), p);
     let stop = events.stop_handle();
 
     let Event::Retrying { delay, .. } = next(&mut events).await else {
@@ -364,7 +377,7 @@ async fn stop_during_backoff_ends_the_stream_promptly() {
 async fn stop_during_a_session_disconnects_the_device() {
     let transport = MockTransport::new();
     let connector = ScriptedConnector::new(vec![], vec![Step::Session(transport.clone())]);
-    let mut events = ReconnectingReadings::new(connector, Some(()), policy());
+    let mut events = Reconnecting::new(connector, Readings, Some(()), policy());
     let stop = events.stop_handle().clone();
 
     assert!(matches!(next(&mut events).await, Event::Connected));
@@ -377,7 +390,7 @@ async fn stop_during_a_session_disconnects_the_device() {
 async fn dropping_the_stream_aborts_the_supervisor_without_disconnecting() {
     let transport = MockTransport::new();
     let connector = ScriptedConnector::new(vec![], vec![Step::Session(transport.clone())]);
-    let mut events = ReconnectingReadings::new(connector.clone(), Some(()), policy());
+    let mut events = Reconnecting::new(connector.clone(), Readings, Some(()), policy());
     assert!(matches!(next(&mut events).await, Event::Connected));
     drop(events);
     for _ in 0..10 {
@@ -399,7 +412,7 @@ async fn subscribe_failure_is_retried_as_a_connect_failure() {
         vec![Step::Found],
         vec![Step::Session(bad.clone()), Step::Session(good)],
     );
-    let mut events = ReconnectingReadings::new(connector.clone(), Some(()), policy());
+    let mut events = Reconnecting::new(connector.clone(), Readings, Some(()), policy());
 
     assert!(matches!(
         next(&mut events).await,
@@ -408,12 +421,88 @@ async fn subscribe_failure_is_retried_as_a_connect_failure() {
     assert!(matches!(next(&mut events).await, Event::Connected));
     assert_eq!(bad.disconnect_count(), 1);
     // A handle that failed after connecting is dead: the next attempt rescans.
+    assert_eq!(connector.calls(), rescan());
+}
+
+#[tokio::test(start_paused = true)]
+async fn measurements_source_opens_both_characteristics_per_connection() {
+    let first = MockTransport::new();
+    let second = MockTransport::new();
+    let connector = ScriptedConnector::new(
+        vec![Step::Found],
+        vec![Step::Session(first.clone()), Step::Session(second.clone())],
+    );
+    let mut events = Reconnecting::new(connector.clone(), Measurements, Some(()), policy());
+
+    assert!(matches!(next(&mut events).await, Event::Connected));
     assert_eq!(
-        connector.calls(),
-        vec![
-            Call::Connect(Duration::from_secs(30)),
-            Call::Find(Duration::from_secs(30)),
-            Call::Connect(Duration::from_secs(30)),
-        ]
+        first.subscriptions.lock().unwrap().as_slice(),
+        &[uuids::BINARY_READING, uuids::ASCII_READING]
+    );
+    // Which record wins is the client's business (see `client_mock`); here
+    // only the item type and the per-connection subscriptions matter.
+    first.notify(uuids::ASCII_READING, &hex(ASCII_VOLTS));
+    assert!(matches!(
+        next(&mut events).await,
+        Event::Item(Ok(m)) if m.primary().as_ascii().is_some()
+    ));
+
+    reconnect_after_dropping(&mut events, &first).await;
+    assert_eq!(
+        second.subscriptions.lock().unwrap().as_slice(),
+        &[uuids::BINARY_READING, uuids::ASCII_READING]
+    );
+    assert_eq!(connector.calls(), rescan());
+}
+
+#[tokio::test(start_paused = true)]
+async fn measurements_source_without_characteristics_is_retried() {
+    let bare = MockTransport::new()
+        .without_characteristic(uuids::BINARY_READING)
+        .without_characteristic(uuids::ASCII_READING);
+    let good = MockTransport::new();
+    let connector = ScriptedConnector::new(
+        vec![Step::Found],
+        vec![Step::Session(bare.clone()), Step::Session(good)],
+    );
+    let mut events = Reconnecting::new(connector.clone(), Measurements, Some(()), policy());
+
+    assert!(matches!(
+        next(&mut events).await,
+        Event::Retrying {
+            attempt: 1,
+            error: Error::NoReadingCharacteristic,
+            ..
+        }
+    ));
+    assert!(matches!(next(&mut events).await, Event::Connected));
+    assert_eq!(bare.disconnect_count(), 1);
+    assert_eq!(connector.calls(), rescan());
+}
+
+#[tokio::test(start_paused = true)]
+async fn battery_source_yields_plain_levels() {
+    let first = MockTransport::new();
+    let second = MockTransport::new();
+    let connector = ScriptedConnector::new(
+        vec![Step::Found],
+        vec![Step::Session(first.clone()), Step::Session(second.clone())],
+    );
+    let mut events = Reconnecting::new(connector, BatteryUpdates, Some(()), policy());
+
+    assert!(matches!(next(&mut events).await, Event::Connected));
+    assert_eq!(
+        first.subscriptions.lock().unwrap().as_slice(),
+        &[uuids::BATTERY_LEVEL]
+    );
+    first.notify(uuids::BATTERY_LEVEL, &[60]);
+    first.notify(uuids::BATTERY_LEVEL, &[59]);
+    assert!(matches!(next(&mut events).await, Event::Item(60)));
+    assert!(matches!(next(&mut events).await, Event::Item(59)));
+
+    reconnect_after_dropping(&mut events, &first).await;
+    assert_eq!(
+        second.subscriptions.lock().unwrap().as_slice(),
+        &[uuids::BATTERY_LEVEL]
     );
 }
