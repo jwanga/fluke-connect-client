@@ -169,7 +169,7 @@ fluke-connect info                # device information, battery, name, ID
 fluke-connect stream              # live readings, auto-selecting the source; --json for machine output
 fluke-connect stream --binary     # the binary record only
 fluke-connect stream --ascii      # the ASCII display string only (376 FC, 902 FC and similar)
-fluke-connect stream --reconnect  # keep streaming across disconnects; combines with --binary / --ascii
+fluke-connect stream --reconnect  # keep streaming across disconnects; with --binary / --ascii a missing source is retried
 fluke-connect stream --reconnect --idle-timeout 30  # also drop a link that is silent for 30 s
 fluke-connect stream --reconnect --max-attempts 10  # also give up after 10 failed scans or connects
 fluke-connect dump readings.jsonl # raw notification capture for bug reports
