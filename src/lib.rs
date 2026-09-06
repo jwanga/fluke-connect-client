@@ -17,7 +17,9 @@
 //! - `client` (feature `std`): the `FlukeDevice` type that subscribes to
 //!   readings and exposes the housekeeping characteristics.
 //! - `backend` (feature `ble`): the built-in
-//!   [btleplug](https://crates.io/crates/btleplug) transport.
+//!   [btleplug](https://crates.io/crates/btleplug) transport. It opens an
+//!   adapter itself or wraps one the application already owns; the crate
+//!   re-exports `btleplug` so the two agree on the version.
 //! - `reconnect` (feature `ble`): a supervised stream over any device
 //!   subscription (measurements, readings, battery) that re-scans and
 //!   reconnects with backoff when the connection drops.
@@ -53,6 +55,15 @@ pub mod backend;
 #[cfg(feature = "ble")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ble")))]
 pub mod reconnect;
+
+/// The btleplug version this crate links against.
+///
+/// Build a [`platform::Adapter`](btleplug::platform::Adapter) from it and
+/// hand it to [`backend::Adapter::from_btleplug`] when the application
+/// already owns a Bluetooth adapter.
+#[cfg(feature = "ble")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ble")))]
+pub use btleplug;
 
 #[cfg(feature = "std")]
 pub use client::{DeviceInfo, FlukeDevice};

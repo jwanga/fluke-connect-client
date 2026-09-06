@@ -86,8 +86,19 @@ filters across clients), `connect` establishes the GATT connection,
 discovers services and builds a UUID to characteristic map.
 `BtleplugTransport` implements `Transport`; its notification stream is the
 btleplug notification stream merged with the adapter's disconnect events so
-it terminates on disconnect. No btleplug or tokio types appear in the public
-API, so the backend can change or gain siblings without a breaking release.
+it terminates on disconnect.
+
+`Adapter::open` opens the system's first adapter; `Adapter::from_btleplug`
+(and `From`) wraps a `btleplug::platform::Adapter` the application already
+owns, and the crate re-exports `btleplug` so host and crate agree on the
+version. That constructor is the only place a btleplug type appears in the
+public API, and no tokio types do. The cost is that a btleplug minor release
+is a breaking release for the `ble` feature; it is accepted so that an
+application with its own Bluetooth stack does not have to open a second
+adapter handle. Sharing has side effects that are documented on the
+constructor: each scan stops whatever scan the host had running, and the
+reconnecting stream clears the adapter's cached peripherals (for every
+device) before each re-scan, which `CoreBluetooth` requires.
 
 ### reconnect
 
