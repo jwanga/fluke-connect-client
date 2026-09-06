@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(backend)* passive discovery for shared adapters: `Adapter::describe` and `connect_id` accept a peripheral the host found itself, `watch_first` / `watch_by_address` wait for the device on a scan the host is already running, and `PassiveAddressConnector` gives `Reconnecting::new` the same behaviour; none of them start or stop a scan or clear the peripheral cache
+
+### Changed
+
+- *(backend)* the reconnecting streams no longer call `clear_peripherals` on Linux, where btleplug's BlueZ backend makes it a no-op
+
+### Other
+
+- *(backend)* document the owned-scan and passive modes on `from_btleplug`, including that passive reconnection on CoreBluetooth needs the host to clear btleplug's peripheral cache after a disconnect
+
 ## [0.2.1] - 2026-09-05
 
 ### Added

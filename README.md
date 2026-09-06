@@ -213,6 +213,19 @@ example and lists what the shared adapter will see. Because a btleplug type
 is part of that constructor, a btleplug minor release is a breaking release
 of this crate's `ble` feature.
 
+If your program also owns the scan (on BlueZ a shared adapter is a single
+discovery client, so the crate's own scans would end yours), use the passive
+mode: hand a peripheral you discovered to
+[`Adapter::describe`](https://docs.rs/fluke-connect-client/latest/fluke_connect_client/backend/struct.Adapter.html#method.describe)
+or `connect_id`, or let `watch_first` / `watch_by_address` wait for the meter
+on your running scan, and reconnect through
+[`PassiveAddressConnector`](https://docs.rs/fluke-connect-client/latest/fluke_connect_client/backend/struct.PassiveAddressConnector.html)
+with `Reconnecting::new`. In that mode the crate never starts or stops a scan;
+on BlueZ your scan filter must be empty or include the Fluke reading service
+UUID. On macOS, btleplug 0.13 keeps a disconnected peripheral's stale handle
+until `clear_peripherals` is called, so a passive reconnect there needs your
+program to clear the cache after each disconnect.
+
 ## Bring your own Bluetooth stack
 
 Implement the small [`Transport`](https://docs.rs/fluke-connect-client/latest/fluke_connect_client/transport/trait.Transport.html)

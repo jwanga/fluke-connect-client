@@ -91,13 +91,29 @@ it terminates on disconnect.
 `Adapter::open` opens the system's first adapter; `Adapter::from_btleplug`
 (and `From`) wraps a `btleplug::platform::Adapter` the application already
 owns, and the crate re-exports `btleplug` so host and crate agree on the
-version. That constructor is the only place a btleplug type appears in this
-crate's own signatures, and no tokio types do. The cost is that a btleplug
+version. That constructor, and the `PeripheralId` accepted by `describe` and
+`connect_id`, are the only places a btleplug type appears in this crate's
+own signatures, and no tokio types do. The cost is that a btleplug
 minor release is a breaking release for the `ble` feature; it is accepted so
 that an application with its own Bluetooth stack does not have to open a
 second adapter handle. The side effects of sharing (scan pre-emption,
-peripheral-cache clearing before each re-scan) are documented on the
-constructor.
+peripheral-cache clearing before each re-scan, skipped on Linux where BlueZ
+makes it a no-op) are documented on the constructor.
+
+Discovery has two modes. The owned-scan `scan` / `find_*` methods and the
+`AddressConnector` behind `stream_with_reconnect` run the crate's own
+filtered scan. The passive `describe` / `connect_id` / `watch_*` methods and
+the public `PassiveAddressConnector` only read the adapter's event stream,
+for a host that shares the adapter and keeps its own scan running; they
+never call `start_scan`, `stop_scan` or `clear_peripherals`. On
+CoreBluetooth that last point is a limitation: btleplug 0.13 keeps a
+disconnected peripheral's stale handle until the cache is cleared, so passive
+reconnection on macOS needs the host to clear it. Both loops are
+written against a private `Discovery` trait implemented by
+`btleplug::platform::Adapter`, so unit tests drive them with a fake central
+that replays advertisement events and counts scan calls; `PeripheralId` has
+no public constructor on BlueZ, which is why the fake cannot emit real
+`CentralEvent`s and the trait carries its own id and event types.
 
 ### reconnect
 
@@ -164,7 +180,13 @@ first-run failure.
    expects the reconnecting stream to survive a power cycle of the device.
    A third, needing only a Bluetooth adapter, wraps the system adapter
    through `Adapter::from_btleplug` and `From` and checks it reports the
-   same `info()` as the raw btleplug handle.
+   same `info()` as the raw btleplug handle. A fourth starts a scan on the
+   raw handle the way a host would and expects `watch_first` to find the
+   device on it and `connect_id` to connect, without the scan being stopped.
+   Unit tests in `src/backend/mod.rs` drive the owned and passive discovery
+   loops against a fake central: the passive loop returns the device on
+   each advertisement event, returns nothing at the window end, and makes
+   zero `start_scan` / `stop_scan` calls.
 5. `tests/measurement_parity.rs` pairs binary records with the ASCII text
    of the same display and requires equal value, unit, state and `Display`
    through `Measurement`; property tests check that wrapping a
