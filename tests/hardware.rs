@@ -12,7 +12,9 @@
 use std::time::Duration;
 
 use fluke_connect_client::backend::Adapter;
-use fluke_connect_client::btleplug::api::{Central as _, Manager as _};
+use fluke_connect_client::btleplug::api::{
+    Central as _, Manager as _, Peripheral as _, ScanFilter,
+};
 use fluke_connect_client::btleplug::platform::Manager;
 use fluke_connect_client::reconnect::{Event, ReconnectPolicy, Reconnecting};
 use futures_util::StreamExt as _;
@@ -79,6 +81,70 @@ async fn wraps_a_host_supplied_adapter() {
         expected
     );
     let _via_from: Adapter = host_adapter.into();
+}
+
+#[tokio::test]
+#[ignore = "needs a powered-on Fluke Connect device in range"]
+async fn finds_and_connects_on_a_host_owned_scan() {
+    if !enabled() {
+        eprintln!("FLUKE_CONNECT_HW is not set; skipping");
+        return;
+    }
+    let manager = Manager::new().await.expect("btleplug manager");
+    let host_adapter = manager
+        .adapters()
+        .await
+        .expect("adapter list")
+        .into_iter()
+        .next()
+        .expect("a Bluetooth adapter");
+    // The host scans unfiltered, as a program watching several device kinds
+    // would, and keeps that scan for the whole test.
+    host_adapter
+        .start_scan(ScanFilter::default())
+        .await
+        .expect("host scan");
+    let adapter = Adapter::from_btleplug(host_adapter.clone());
+
+    eprintln!("waiting on the host's scan (hold the adapter's button until its LED flashes)...");
+    let device = adapter
+        .watch_first(Duration::from_secs(90))
+        .await
+        .expect("a Fluke Connect device advertised on the host's scan");
+    eprintln!("watched: {device}");
+
+    // A host that found the meter itself hands over the peripheral id.
+    let mut handed_over = None;
+    for peripheral in host_adapter.peripherals().await.expect("peripherals") {
+        let id = peripheral.id();
+        if let Some(described) = adapter.describe(&id).await.expect("describe")
+            && described.address() == device.address()
+        {
+            handed_over = Some(id);
+            break;
+        }
+    }
+    let id = handed_over.expect("describe finds the watched device among the host's peripherals");
+    let connected = adapter
+        .connect_id(&id, Duration::from_secs(30))
+        .await
+        .expect("connect_id");
+    let mut measurements = connected.measurements().await.expect("subscribe");
+    let first = tokio::time::timeout(Duration::from_secs(30), measurements.next())
+        .await
+        .expect("a measurement within 30 s")
+        .expect("stream still open");
+    eprintln!("first measurement: {first:?}");
+    drop(measurements);
+    connected.disconnect().await.expect("disconnect");
+
+    // The crate must not have stopped the host's scan. `BlueZ` rejects
+    // stop_scan when no discovery is running, so this is a real check on
+    // Linux; CoreBluetooth accepts it unconditionally.
+    host_adapter
+        .stop_scan()
+        .await
+        .expect("the host's scan was still running");
 }
 
 /// Waits for an event matching `want`, skipping other events, within `limit`.
