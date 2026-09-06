@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-05
+
+### Added
+
+- *(backend)* accept a host-supplied btleplug adapter via `Adapter::from_btleplug` / `From`; `btleplug` is re-exported so hosts match its version
+
+### Other
+
+- *(release)* publish to crates.io from a `v*` tag via `scripts/release.sh`; release-plz removed
+- *(backend)* keep the shared-adapter caveats in one place
+
 ## [0.2.0](https://github.com/jwanga/fluke-connect-client/compare/v0.1.0...v0.2.0) - 2026-09-04
 
 ### Added
