@@ -205,27 +205,13 @@ protocol parser, suitable for embedded hosts that bring their own BLE stack.
 
 ## Share the application's Bluetooth adapter
 
-If your program already owns a btleplug adapter, wrap it instead of letting
-the crate open a second handle. The crate re-exports `btleplug` so the types
-line up:
-
-```rust,no_run
-use fluke_connect_client::backend::Adapter;
-use fluke_connect_client::btleplug::api::Manager as _;
-use fluke_connect_client::btleplug::platform::Manager;
-
-# async fn run() -> Result<(), Box<dyn std::error::Error>> {
-let manager = Manager::new().await?;
-let first = manager.adapters().await?.into_iter().next().ok_or("no adapter")?;
-let adapter = Adapter::from_btleplug(first);
-# Ok(()) }
-```
-
-The adapter stays shared: every scan stops any scan the host has running,
-and the reconnecting stream forgets the adapter's cached peripherals before
-each re-scan (all of them, not only the Fluke device), which btleplug needs
-on macOS. Because a btleplug type is part of this constructor, a btleplug
-minor release is a breaking release of this crate's `ble` feature.
+If your program already owns a btleplug adapter, wrap it with
+[`Adapter::from_btleplug`](https://docs.rs/fluke-connect-client/latest/fluke_connect_client/backend/struct.Adapter.html#method.from_btleplug)
+instead of letting the crate open a second handle. The crate re-exports
+`btleplug` so the types line up; the constructor's documentation has an
+example and lists what the shared adapter will see. Because a btleplug type
+is part of that constructor, a btleplug minor release is a breaking release
+of this crate's `ble` feature.
 
 ## Bring your own Bluetooth stack
 

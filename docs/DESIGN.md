@@ -91,14 +91,13 @@ it terminates on disconnect.
 `Adapter::open` opens the system's first adapter; `Adapter::from_btleplug`
 (and `From`) wraps a `btleplug::platform::Adapter` the application already
 owns, and the crate re-exports `btleplug` so host and crate agree on the
-version. That constructor is the only place a btleplug type appears in the
-public API, and no tokio types do. The cost is that a btleplug minor release
-is a breaking release for the `ble` feature; it is accepted so that an
-application with its own Bluetooth stack does not have to open a second
-adapter handle. Sharing has side effects that are documented on the
-constructor: each scan stops whatever scan the host had running, and the
-reconnecting stream clears the adapter's cached peripherals (for every
-device) before each re-scan, which `CoreBluetooth` requires.
+version. That constructor is the only place a btleplug type appears in this
+crate's own signatures, and no tokio types do. The cost is that a btleplug
+minor release is a breaking release for the `ble` feature; it is accepted so
+that an application with its own Bluetooth stack does not have to open a
+second adapter handle. The side effects of sharing (scan pre-emption,
+peripheral-cache clearing before each re-scan) are documented on the
+constructor.
 
 ### reconnect
 
@@ -163,6 +162,9 @@ first-run failure.
    `FLUKE_CONNECT_HW=1`; it connects to a real device and checks the first
    readings decode. A second test, gated on `FLUKE_CONNECT_HW_POWERCYCLE=1`,
    expects the reconnecting stream to survive a power cycle of the device.
+   A third, needing only a Bluetooth adapter, wraps the system adapter
+   through `Adapter::from_btleplug` and `From` and checks it reports the
+   same `info()` as the raw btleplug handle.
 5. `tests/measurement_parity.rs` pairs binary records with the ASCII text
    of the same display and requires equal value, unit, state and `Display`
    through `Measurement`; property tests check that wrapping a

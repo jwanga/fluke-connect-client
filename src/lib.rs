@@ -17,9 +17,7 @@
 //! - `client` (feature `std`): the `FlukeDevice` type that subscribes to
 //!   readings and exposes the housekeeping characteristics.
 //! - `backend` (feature `ble`): the built-in
-//!   [btleplug](https://crates.io/crates/btleplug) transport. It opens an
-//!   adapter itself or wraps one the application already owns; the crate
-//!   re-exports `btleplug` so the two agree on the version.
+//!   [btleplug](https://crates.io/crates/btleplug) transport.
 //! - `reconnect` (feature `ble`): a supervised stream over any device
 //!   subscription (measurements, readings, battery) that re-scans and
 //!   reconnects with backoff when the connection drops.
