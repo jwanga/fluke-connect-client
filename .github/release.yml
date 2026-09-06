@@ -1,0 +1,15 @@
+# Categorizes the pull-request list GitHub appends to release notes.
+changelog:
+  exclude:
+    labels: [duplicate, invalid, wontfix]
+  categories:
+    - title: Breaking changes
+      labels: [breaking]
+    - title: Added
+      labels: [enhancement]
+    - title: Fixed
+      labels: [bug]
+    - title: Documentation
+      labels: [documentation]
+    - title: Other changes
+      labels: ["*"]

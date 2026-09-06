@@ -1,29 +1,28 @@
 name: Release
 
+# Publishes the tagged version to crates.io; scripts/release.sh has the checks.
 on:
   push:
-    branches: [main]
+    tags: ["v*"]
 
 permissions:
-  pull-requests: write
-  contents: write
+  contents: read
 
 jobs:
-  release-plz:
-    name: release-plz
+  publish:
+    name: Publish to crates.io
     runs-on: ubuntu-24.04
     concurrency:
-      group: release-plz-${{ github.ref }}
+      group: release-${{ github.ref }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
+          # The script checks that the tagged commit is reachable from main.
           fetch-depth: 0
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
-      - uses: release-plz/action@v0.5
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/release.sh "$GITHUB_REF_NAME"
         env:
-          # A personal access token lets CI run on the release PR; the
-          # default token cannot trigger workflows.
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

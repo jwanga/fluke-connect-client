@@ -176,5 +176,9 @@ first-run failure.
 
 Edition 2024, MSRV 1.88, dual MIT / Apache-2.0, clippy `pedantic`,
 `nursery`, `cargo` plus selected restriction lints with warnings denied in
-CI, `cargo-deny`, release-plz with conventional commits, and an explicit
-`include` list in `Cargo.toml`.
+CI, `cargo-deny`, conventional commits, and an explicit `include` list in
+`Cargo.toml`. Releases are cut locally: the version bump, `CHANGELOG.md`
+entry, annotated `v<semver>` tag and GitHub Release are made together, and
+pushing the tag runs `scripts/release.sh` in GitHub Actions, which checks
+that the tag matches `Cargo.toml` and sits on `main`, skips versions already
+published, and publishes to crates.io.
