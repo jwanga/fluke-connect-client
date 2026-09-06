@@ -1,9 +1,6 @@
 name: Release
 
-# Releases are cut locally: the version is bumped in Cargo.toml, CHANGELOG.md
-# is written, an annotated `v<semver>` tag is pushed and the GitHub Release is
-# created. Pushing that tag is what runs this workflow, whose only job is the
-# crates.io publish. See scripts/release.sh for the checks it performs.
+# Publishes the tagged version to crates.io; scripts/release.sh has the checks.
 on:
   push:
     tags: ["v*"]
