@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/jwanga/fluke-connect-client/compare/v0.2.1...v0.2.2) - 2026-09-05
+
 ### Added
 
 - *(backend)* passive discovery for shared adapters: `Adapter::describe` and `connect_id` accept a peripheral the host found itself, `watch_first` / `watch_by_address` wait for the device on a scan the host is already running, and `PassiveAddressConnector` gives `Reconnecting::new` the same behaviour; none of them start or stop a scan or clear the peripheral cache
