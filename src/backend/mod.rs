@@ -1,9 +1,10 @@
 //! Built-in Bluetooth transport backed by [btleplug](https://crates.io/crates/btleplug).
 //!
 //! [`Adapter`] discovers Fluke Connect devices and connects to them,
-//! producing a [`FlukeDevice`] over a [`BtleplugTransport`]. No btleplug
-//! types are exposed, so this backend can evolve independently of the
-//! public API.
+//! producing a [`FlukeDevice`] over a [`BtleplugTransport`]. The only
+//! btleplug type in this crate's own signatures is the adapter accepted by
+//! [`Adapter::from_btleplug`]; everything else is wrapped so the backend can
+//! evolve independently.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -89,6 +90,9 @@ pub struct Adapter {
 impl Adapter {
     /// Opens the system's first Bluetooth adapter.
     ///
+    /// Applications that already hold a btleplug adapter should wrap it with
+    /// [`from_btleplug`](Self::from_btleplug) instead of opening a second one.
+    ///
     /// # Errors
     ///
     /// Returns [`TransportError::NoAdapter`] when there is none, and
@@ -104,6 +108,45 @@ impl Adapter {
             .next()
             .ok_or(TransportError::NoAdapter)?;
         Ok(Self { inner })
+    }
+
+    /// Wraps a btleplug adapter the application already owns.
+    ///
+    /// Use this instead of [`open`](Self::open) when the host has its own
+    /// btleplug [`Manager`], for example because it also talks to other
+    /// peripherals or chose among several adapters. The adapter must come
+    /// from the btleplug version this crate links against, which
+    /// [`fluke_connect_client::btleplug`](crate::btleplug) re-exports.
+    ///
+    /// The adapter stays shared, so this crate's use of it is visible to the
+    /// rest of the application:
+    ///
+    /// - every scan ([`scan`](Self::scan), [`find_first`](Self::find_first),
+    ///   [`find_by_address`](Self::find_by_address) and
+    ///   [`connect_first`](Self::connect_first)) first stops any scan already
+    ///   running on the adapter, starts its own filtered on the Fluke reading
+    ///   service, and stops that again when its window ends; the host's scan
+    ///   is not resumed;
+    /// - the reconnecting streams ([`stream_with_reconnect`](Self::stream_with_reconnect)
+    ///   and [`measurements_with_reconnect`](Self::measurements_with_reconnect))
+    ///   forget the adapter's cached peripherals before every re-scan, for
+    ///   *all* devices and not only the Fluke one, because btleplug on
+    ///   `CoreBluetooth` cannot reconnect through a stale handle.
+    ///
+    /// ```no_run
+    /// use fluke_connect_client::backend::Adapter;
+    /// use fluke_connect_client::btleplug::api::Manager as _;
+    /// use fluke_connect_client::btleplug::platform::Manager;
+    ///
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let manager = Manager::new().await?;
+    /// let first = manager.adapters().await?.into_iter().next().ok_or("no adapter")?;
+    /// let adapter = Adapter::from_btleplug(first);
+    /// # Ok(()) }
+    /// ```
+    #[must_use]
+    pub const fn from_btleplug(adapter: platform::Adapter) -> Self {
+        Self { inner: adapter }
     }
 
     /// Human-readable description of the adapter.
@@ -349,6 +392,13 @@ impl Adapter {
             address,
             rssi: props.rssi,
         })
+    }
+}
+
+impl From<platform::Adapter> for Adapter {
+    /// Same as [`Adapter::from_btleplug`].
+    fn from(adapter: platform::Adapter) -> Self {
+        Self::from_btleplug(adapter)
     }
 }
 

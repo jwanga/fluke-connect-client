@@ -12,6 +12,8 @@
 use std::time::Duration;
 
 use fluke_connect_client::backend::Adapter;
+use fluke_connect_client::btleplug::api::{Central as _, Manager as _};
+use fluke_connect_client::btleplug::platform::Manager;
 use fluke_connect_client::reconnect::{Event, ReconnectPolicy, Reconnecting};
 use futures_util::StreamExt as _;
 
@@ -52,6 +54,31 @@ async fn streams_readings_from_a_real_device() {
         Err(e) => eprintln!("ascii display unavailable: {e}"),
     }
     device.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore = "needs a Bluetooth adapter the test process may use"]
+async fn wraps_a_host_supplied_adapter() {
+    if !enabled() {
+        eprintln!("FLUKE_CONNECT_HW is not set; skipping");
+        return;
+    }
+    let manager = Manager::new().await.expect("btleplug manager");
+    let host_adapter = manager
+        .adapters()
+        .await
+        .expect("adapter list")
+        .into_iter()
+        .next()
+        .expect("a Bluetooth adapter");
+    let expected = host_adapter.adapter_info().await.expect("adapter info");
+
+    let adapter = Adapter::from_btleplug(host_adapter.clone());
+    assert_eq!(
+        adapter.info().await.expect("wrapped adapter info"),
+        expected
+    );
+    let _via_from: Adapter = host_adapter.into();
 }
 
 /// Waits for an event matching `want`, skipping other events, within `limit`.

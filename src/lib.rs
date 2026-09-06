@@ -54,6 +54,15 @@ pub mod backend;
 #[cfg_attr(docsrs, doc(cfg(feature = "ble")))]
 pub mod reconnect;
 
+/// The btleplug version this crate links against.
+///
+/// Build a [`platform::Adapter`](btleplug::platform::Adapter) from it and
+/// hand it to [`backend::Adapter::from_btleplug`] when the application
+/// already owns a Bluetooth adapter.
+#[cfg(feature = "ble")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ble")))]
+pub use btleplug;
+
 #[cfg(feature = "std")]
 pub use client::{DeviceInfo, FlukeDevice};
 #[cfg(feature = "std")]

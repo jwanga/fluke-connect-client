@@ -203,6 +203,16 @@ fluke-connect locator on          # blink the device LED
 With `default-features = false` the crate is `no_std` and contains only the
 protocol parser, suitable for embedded hosts that bring their own BLE stack.
 
+## Share the application's Bluetooth adapter
+
+If your program already owns a btleplug adapter, wrap it with
+[`Adapter::from_btleplug`](https://docs.rs/fluke-connect-client/latest/fluke_connect_client/backend/struct.Adapter.html#method.from_btleplug)
+instead of letting the crate open a second handle. The crate re-exports
+`btleplug` so the types line up; the constructor's documentation has an
+example and lists what the shared adapter will see. Because a btleplug type
+is part of that constructor, a btleplug minor release is a breaking release
+of this crate's `ble` feature.
+
 ## Bring your own Bluetooth stack
 
 Implement the small [`Transport`](https://docs.rs/fluke-connect-client/latest/fluke_connect_client/transport/trait.Transport.html)
