@@ -1,0 +1,31 @@
+name: Release
+
+# Releases are cut locally: the version is bumped in Cargo.toml, CHANGELOG.md
+# is written, an annotated `v<semver>` tag is pushed and the GitHub Release is
+# created. Pushing that tag is what runs this workflow, whose only job is the
+# crates.io publish. See scripts/release.sh for the checks it performs.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The script checks that the tagged commit is reachable from main.
+          fetch-depth: 0
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/release.sh "$GITHUB_REF_NAME"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
