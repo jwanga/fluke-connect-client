@@ -4,8 +4,8 @@
 //! producing a [`FlukeDevice`] over a [`BtleplugTransport`]. The only
 //! btleplug types in this crate's own signatures are the adapter accepted by
 //! [`Adapter::from_btleplug`] and the peripheral identifier accepted by
-//! [`Adapter::describe`]; everything else is wrapped so the backend can
-//! evolve independently.
+//! [`Adapter::describe`] and [`Adapter::connect_id`]; everything else is
+//! wrapped so the backend can evolve independently.
 //!
 //! Discovery comes in two modes. The `find_*` and `scan` methods run their
 //! own scan on the adapter. The `watch_*` methods and
@@ -157,7 +157,12 @@ impl Adapter {
     ///   a scan running whenever the device has to be (re)found, and on
     ///   `BlueZ` that scan's filter must either be empty or include the Fluke
     ///   reading service UUID ([`protocol::uuids::READING_SERVICE`]), because
-    ///   `BlueZ` merges the filters of all discovery clients.
+    ///   `BlueZ` merges the filters of all discovery clients. `BlueZ` also
+    ///   reports a device it still knows from its cache at once, scanning or
+    ///   not. On `CoreBluetooth` btleplug 0.13 keeps a disconnected
+    ///   peripheral's stale handle until `clear_peripherals` is called, so
+    ///   passive reconnection there needs the host to clear the cache after
+    ///   each disconnect; see [`PassiveAddressConnector`].
     ///
     /// [`protocol::uuids::READING_SERVICE`]: crate::protocol::uuids::READING_SERVICE
     ///
@@ -236,9 +241,10 @@ impl Adapter {
     ///
     /// Passive counterpart of [`find_first`](Self::find_first): this only
     /// subscribes to the adapter's events and never starts or stops a scan,
-    /// so nothing is seen unless the host is scanning. On `BlueZ` the host's
-    /// scan filter must be empty or include the Fluke reading service UUID.
-    /// See [`from_btleplug`](Self::from_btleplug).
+    /// so nothing new is seen unless the host is scanning. On `BlueZ` the
+    /// host's scan filter must be empty or include the Fluke reading service
+    /// UUID, and a device the daemon still knows is reported at once from its
+    /// cache. See [`from_btleplug`](Self::from_btleplug).
     ///
     /// # Errors
     ///
@@ -329,10 +335,8 @@ impl Adapter {
         source: S,
         policy: ReconnectPolicy,
     ) -> Reconnecting<S::Item> {
-        let connector = AddressConnector {
-            adapter: self.clone(),
-            address: device.address.clone(),
-        };
+        let connector =
+            AddressConnector(PassiveAddressConnector::new(self.clone(), &device.address));
         Reconnecting::new(connector, source, Some(device.clone()), policy)
     }
 
@@ -448,9 +452,6 @@ trait Discovery: Send + Sync {
 
     /// Stops the running scan, if any.
     fn stop_scan(&self) -> impl Future<Output = Result<()>> + Send;
-
-    /// Forgets every cached peripheral.
-    fn clear_peripherals(&self) -> impl Future<Output = Result<()>> + Send;
 }
 
 impl Discovery for platform::Adapter {
@@ -509,10 +510,6 @@ impl Discovery for platform::Adapter {
 
     async fn stop_scan(&self) -> Result<()> {
         Ok(Central::stop_scan(self).await.map_err(map_err)?)
-    }
-
-    async fn clear_peripherals(&self) -> Result<()> {
-        Ok(Central::clear_peripherals(self).await.map_err(map_err)?)
     }
 }
 
@@ -612,14 +609,9 @@ impl Drop for ConnectGuard {
 }
 
 /// [`Connector`] that re-finds one device by address on every attempt with
-/// its own scan.
+/// its own scan; the owned-scan twin of [`PassiveAddressConnector`].
 #[derive(Debug)]
-struct AddressConnector {
-    /// Adapter to scan and connect with.
-    adapter: Adapter,
-    /// Platform address of the device to follow.
-    address: String,
-}
+struct AddressConnector(PassiveAddressConnector);
 
 impl Connector for AddressConnector {
     type Target = DiscoveredDevice;
@@ -633,9 +625,14 @@ impl Connector for AddressConnector {
         // Linux btleplug's `BlueZ` backend implements it as a no-op, so the
         // call is skipped there.
         if !cfg!(target_os = "linux") {
-            Discovery::clear_peripherals(&self.adapter.inner).await?;
+            Central::clear_peripherals(&self.0.adapter.inner)
+                .await
+                .map_err(map_err)?;
         }
-        self.adapter.find_by_address(&self.address, window).await
+        self.0
+            .adapter
+            .find_by_address(&self.0.address, window)
+            .await
     }
 
     async fn connect(
@@ -643,7 +640,7 @@ impl Connector for AddressConnector {
         target: &DiscoveredDevice,
         timeout: Duration,
     ) -> Result<FlukeDevice<BtleplugTransport>> {
-        self.adapter.connect_with_timeout(target, timeout).await
+        self.0.connect(target, timeout).await
     }
 }
 
@@ -676,9 +673,13 @@ impl Connector for AddressConnector {
 /// # Ok(()) }
 /// ```
 ///
-/// On `CoreBluetooth` the reconnection needs a handle from a fresh
-/// advertisement of the device, which the passive loop provides as long as
-/// the host's scan is running.
+/// On `CoreBluetooth` btleplug 0.13 keeps a disconnected peripheral's stale
+/// handle in its cache and ignores the device's next advertisement, so a
+/// passive reconnection there connects through the old handle and receives
+/// no notifications. Until that is fixed upstream, a macOS host must call
+/// `clear_peripherals` on its adapter after each disconnect (which forgets
+/// every device, not only this one) or use
+/// [`Adapter::stream_with_reconnect`], which does so itself.
 #[derive(Debug, Clone)]
 pub struct PassiveAddressConnector {
     /// Adapter to watch and connect with.
@@ -854,8 +855,6 @@ mod tests {
         starts: AtomicUsize,
         /// `stop_scan` calls.
         stops: AtomicUsize,
-        /// `clear_peripherals` calls.
-        clears: AtomicUsize,
     }
 
     impl FakeCentral {
@@ -867,16 +866,14 @@ mod tests {
                 fluke: fluke.iter().copied().collect(),
                 starts: AtomicUsize::new(0),
                 stops: AtomicUsize::new(0),
-                clears: AtomicUsize::new(0),
             }
         }
 
-        /// `(start_scan, stop_scan, clear_peripherals)` call counts.
-        fn scan_calls(&self) -> (usize, usize, usize) {
+        /// `(start_scan, stop_scan)` call counts.
+        fn scan_calls(&self) -> (usize, usize) {
             (
                 self.starts.load(Ordering::SeqCst),
                 self.stops.load(Ordering::SeqCst),
-                self.clears.load(Ordering::SeqCst),
             )
         }
     }
@@ -913,11 +910,6 @@ mod tests {
             self.stops.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-
-        async fn clear_peripherals(&self) -> Result<()> {
-            self.clears.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
     }
 
     /// One scan window in the tests.
@@ -941,7 +933,7 @@ mod tests {
                 started.elapsed() < WINDOW,
                 "{event:?} should end the window early"
             );
-            assert_eq!(central.scan_calls(), (0, 0, 0), "{event:?}");
+            assert_eq!(central.scan_calls(), (0, 0), "{event:?}");
         }
     }
 
@@ -953,7 +945,7 @@ mod tests {
         let found = passive_find(&central, "AA:BB").await.unwrap();
         assert!(found.is_none());
         assert_eq!(started.elapsed(), WINDOW);
-        assert_eq!(central.scan_calls(), (0, 0, 0));
+        assert_eq!(central.scan_calls(), (0, 0));
     }
 
     #[tokio::test(start_paused = true)]
@@ -964,7 +956,7 @@ mod tests {
         );
         let found = passive_find(&central, "CC:DD").await.unwrap();
         assert_eq!(found.as_deref(), Some("CC:DD"));
-        assert_eq!(central.scan_calls(), (0, 0, 0));
+        assert_eq!(central.scan_calls(), (0, 0));
     }
 
     #[tokio::test(start_paused = true)]
@@ -979,7 +971,7 @@ mod tests {
         );
         let found = watch_until(&central, WINDOW, |_| true).await.unwrap();
         assert_eq!(found, vec!["AA:BB".to_owned()]);
-        assert_eq!(central.scan_calls(), (0, 0, 0));
+        assert_eq!(central.scan_calls(), (0, 0));
     }
 
     #[tokio::test(start_paused = true)]
@@ -993,11 +985,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn owned_scan_starts_and_stops_the_scan_but_never_clears() {
+    async fn owned_scan_starts_and_stops_the_scan() {
         let central = FakeCentral::new(&[Event::Discovered(1)], &[(1, "AA:BB")]);
         let found = scan_until(&central, WINDOW, |_| true).await.unwrap();
         assert_eq!(found, vec!["AA:BB".to_owned()]);
         // stop before start (BlueZ rejects a second start) and stop at the end.
-        assert_eq!(central.scan_calls(), (1, 2, 0));
+        assert_eq!(central.scan_calls(), (1, 2));
     }
 }

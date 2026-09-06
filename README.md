@@ -222,7 +222,9 @@ on your running scan, and reconnect through
 [`PassiveAddressConnector`](https://docs.rs/fluke-connect-client/latest/fluke_connect_client/backend/struct.PassiveAddressConnector.html)
 with `Reconnecting::new`. In that mode the crate never starts or stops a scan;
 on BlueZ your scan filter must be empty or include the Fluke reading service
-UUID.
+UUID. On macOS, btleplug 0.13 keeps a disconnected peripheral's stale handle
+until `clear_peripherals` is called, so a passive reconnect there needs your
+program to clear the cache after each disconnect.
 
 ## Bring your own Bluetooth stack
 

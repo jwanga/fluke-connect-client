@@ -12,7 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- *(backend)* the reconnecting streams no longer call `clear_peripherals` on Linux, where btleplug's `BlueZ` backend makes it a no-op; `from_btleplug` documents the owned-scan and passive modes
+- *(backend)* the reconnecting streams no longer call `clear_peripherals` on Linux, where btleplug's BlueZ backend makes it a no-op
+
+### Other
+
+- *(backend)* document the owned-scan and passive modes on `from_btleplug`, including that passive reconnection on CoreBluetooth needs the host to clear btleplug's peripheral cache after a disconnect
 
 ## [0.2.1] - 2026-09-05
 

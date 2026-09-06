@@ -106,6 +106,8 @@ async fn finds_and_connects_on_a_host_owned_scan() {
         .expect("host scan");
     let adapter = Adapter::from_btleplug(host_adapter.clone());
 
+    // On BlueZ a device the daemon still knows is reported from its cache
+    // before the scan sees it; either way the crate must not touch the scan.
     eprintln!("waiting on the host's scan (hold the adapter's button until its LED flashes)...");
     let device = adapter
         .watch_first(Duration::from_secs(90))
